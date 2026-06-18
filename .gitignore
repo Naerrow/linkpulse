@@ -3,3 +3,8 @@ node_modules/
 *.tfvars
 *.pem
 .terraform/
+
+# Go
+/app/bin/
+*.test
+coverage.out
