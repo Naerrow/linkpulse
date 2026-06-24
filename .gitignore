@@ -8,3 +8,5 @@ node_modules/
 /app/bin/
 *.test
 coverage.out
+CLAUDE.md
+AGENTS.md
