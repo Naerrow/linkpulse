@@ -16,6 +16,7 @@ import (
 
 	"github.com/Naerrow/linkpulse/app/internal/config"
 	"github.com/Naerrow/linkpulse/app/internal/httpapi"
+	"github.com/Naerrow/linkpulse/app/internal/links"
 )
 
 // shutdownTimeout은 종료 시 진행 중 요청을 기다려 주는 최대 시간이다.
@@ -31,9 +32,16 @@ func main() {
 
 	setupLogger(cfg.LogLevel)
 
+	// 저장소 → 서비스 → 라우터 순으로 의존성을 조립한다.
+	// 현재 저장소는 인메모리라 재시작 시 데이터가 사라진다. Postgres 도입 전까지의 임시 단계임을
+	// 운영자가 알 수 있게 경고로 남긴다.
+	repo := links.NewMemoryRepository()
+	slog.Warn("인메모리 저장소 사용 중 — 재시작 시 데이터 소실(Postgres 도입 전 임시)")
+	linkSvc := links.NewService(repo, cfg.ShortCodeLength)
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: httpapi.NewRouter(),
+		Handler: httpapi.NewRouter(linkSvc, cfg.PublicBaseURL),
 		// 헤더 수신 타임아웃으로 느린 연결(slowloris)에 대한 최소 방어.
 		ReadHeaderTimeout: 5 * time.Second,
 	}

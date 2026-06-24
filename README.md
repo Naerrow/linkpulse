@@ -38,8 +38,19 @@ Built and operated as a production service, with a focus on reliability and obse
 
 ## 로컬 실행
 
+현재는 앱 단독으로 실행합니다(Postgres·docker-compose는 다음 단계에서 추가되며, 그때 `docker compose up`으로 바뀝니다).
+
 ```bash
-docker compose up
+cd app && go run ./cmd/server
+```
+
+기본 포트는 8080입니다. 동작 확인:
+
+```bash
+# 단축 생성
+curl -X POST localhost:8080/api/links -d '{"url":"https://example.com"}'
+# 리다이렉트 (위 응답의 code 사용)
+curl -i localhost:8080/<code>
 ```
 
 ## 저장소 구조

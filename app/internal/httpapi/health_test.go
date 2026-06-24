@@ -9,10 +9,10 @@ import (
 
 // TestHealthz는 라이브니스 엔드포인트가 200과 {"status":"ok"}를 돌려주는지 검증한다.
 func TestHealthz(t *testing.T) {
-	rec := httptest.NewRecorder()								// 가짜 응답기 생성
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil) // 
+	rec := httptest.NewRecorder()                               // 가짜 응답기 생성
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil) //
 
-	NewRouter().ServeHTTP(rec, req)
+	newTestRouter().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -31,7 +31,7 @@ func TestReadyz(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 
-	NewRouter().ServeHTTP(rec, req)
+	newTestRouter().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -51,7 +51,7 @@ func TestHealthzWrongMethod(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/healthz", nil)
 
-	NewRouter().ServeHTTP(rec, req)
+	newTestRouter().ServeHTTP(rec, req)
 
 	if rec.Code == http.StatusOK {
 		t.Errorf("POST /healthz 가 200을 돌려주면 안 된다 (got %d)", rec.Code)
