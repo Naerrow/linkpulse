@@ -1,6 +1,14 @@
 package httpapi
 
-import "net/http"
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"time"
+)
+
+// readinessTimeout은 레디니스 점검(예: DB 핑)에 허용하는 최대 시간이다.
+const readinessTimeout = 2 * time.Second
 
 // statusResponse는 헬스/레디 체크의 응답 본문이다.
 type statusResponse struct {
@@ -13,8 +21,23 @@ func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, statusResponse{Status: "ok"})
 }
 
-// handleReadyz는 레디니스 체크다. 트래픽을 받을 준비가 되면 200을 돌려준다.
-// 현재는 외부 의존성이 없어 항상 준비됨. DB 연결 확인은 DB 도입 시점에 연결한다.
-func handleReadyz(w http.ResponseWriter, _ *http.Request) {
+// readinessHandler는 레디니스 체크다. 외부 의존성(DB 등) 점검 함수를 주입받는다.
+type readinessHandler struct {
+	check func(ctx context.Context) error // nil이면 항상 준비됨(외부 의존성 없음)
+}
+
+// handle은 트래픽을 받을 준비가 됐는지 응답한다.
+// 점검 함수가 있으면 짧은 타임아웃 안에서 호출하고, 실패하면 503을 돌려줘
+// 로드밸런서가 이 인스턴스로 트래픽을 보내지 않게 한다.
+func (h *readinessHandler) handle(w http.ResponseWriter, r *http.Request) {
+	if h.check != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
+		defer cancel()
+		if err := h.check(ctx); err != nil {
+			slog.Warn("레디니스 점검 실패", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, statusResponse{Status: "unavailable"})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, statusResponse{Status: "ready"})
 }

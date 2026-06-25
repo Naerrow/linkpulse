@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Naerrow/linkpulse/app/internal/config"
+	"github.com/Naerrow/linkpulse/app/internal/db"
 	"github.com/Naerrow/linkpulse/app/internal/httpapi"
 	"github.com/Naerrow/linkpulse/app/internal/links"
 )
@@ -33,15 +34,32 @@ func main() {
 	setupLogger(cfg.LogLevel)
 
 	// 저장소 → 서비스 → 라우터 순으로 의존성을 조립한다.
-	// 현재 저장소는 인메모리라 재시작 시 데이터가 사라진다. Postgres 도입 전까지의 임시 단계임을
-	// 운영자가 알 수 있게 경고로 남긴다.
-	repo := links.NewMemoryRepository()
-	slog.Warn("인메모리 저장소 사용 중 — 재시작 시 데이터 소실(Postgres 도입 전 임시)")
+	// DATABASE_URL이 있으면 Postgres를, 없으면 인메모리(재시작 시 데이터 소실)를 쓴다.
+	var repo links.Repository
+	var readiness func(context.Context) error
+	if cfg.DatabaseURL != "" {
+		pool, err := db.Open(context.Background(), cfg.DatabaseURL)
+		if err != nil {
+			slog.Error("DB 초기화 실패", "error", err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		repo = links.NewPostgresRepository(pool)
+		// readyz가 실제 DB 연결 상태를 반영하도록 핑 함수를 주입한다.
+		readiness = func(ctx context.Context) error { return pool.PingContext(ctx) }
+	} else {
+		slog.Warn("DATABASE_URL 미설정 — 인메모리 저장소 사용(재시작 시 데이터 소실)")
+		repo = links.NewMemoryRepository()
+	}
 	linkSvc := links.NewService(repo, cfg.ShortCodeLength)
 
 	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: httpapi.NewRouter(linkSvc, cfg.PublicBaseURL),
+		Addr: ":" + cfg.Port,
+		Handler: httpapi.NewRouter(httpapi.RouterDeps{
+			Links:     linkSvc,
+			BaseURL:   cfg.PublicBaseURL,
+			Readiness: readiness,
+		}),
 		// 헤더 수신 타임아웃으로 느린 연결(slowloris)에 대한 최소 방어.
 		ReadHeaderTimeout: 5 * time.Second,
 	}

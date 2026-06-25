@@ -25,6 +25,7 @@ type Config struct {
 	LogLevel        string // 로그 레벨 (LOG_LEVEL): debug|info|warn|error
 	PublicBaseURL   string // 단축 URL에 붙일 외부 공개 주소 (PUBLIC_BASE_URL)
 	ShortCodeLength int    // 단축 코드 길이 (SHORT_CODE_LENGTH, 기본 7)
+	DatabaseURL     string // Postgres 접속 문자열 (DATABASE_URL). 비어 있으면 인메모리 저장소 사용.
 }
 
 // Load는 환경변수를 읽어 Config를 만든다.
@@ -51,6 +52,8 @@ func Load() (Config, error) {
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
 		PublicBaseURL:   baseURL,
 		ShortCodeLength: codeLen,
+		// 선택값. 형식 검증은 연결 시점(db.Open의 핑)에서 fail-fast로 처리한다.
+		DatabaseURL: getEnv("DATABASE_URL", ""),
 	}, nil
 }
 
