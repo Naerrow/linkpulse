@@ -38,8 +38,27 @@ Built and operated as a production service, with a focus on reliability and obse
 
 ## 로컬 실행
 
+전체 스택(app + Postgres)을 docker-compose로 띄웁니다.
+
 ```bash
-docker compose up
+docker compose up --build
+```
+
+```bash
+# 단축 생성 → {"code":"...","short_url":"http://localhost:8080/...", ...}
+curl -X POST localhost:8080/api/links -d '{"url":"https://example.com"}'
+# 리다이렉트 (위 응답의 code 사용)
+curl -i localhost:8080/<code>
+```
+
+- 데이터는 Postgres에 저장되며 `pgdata` 볼륨으로 재시작 후에도 유지됩니다.
+- 종료: `docker compose down` (데이터까지 지우려면 `docker compose down -v`).
+- 호스트 8080이 이미 쓰이면: `APP_HOST_PORT=8088 docker compose up --build` (단축 URL도 그 포트로 맞춰집니다).
+
+DB 없이 앱만 빠르게 띄우려면(인메모리, 재시작 시 데이터 소실):
+
+```bash
+cd app && go run ./cmd/server
 ```
 
 ## 저장소 구조
