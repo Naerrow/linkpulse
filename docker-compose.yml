@@ -1,0 +1,40 @@
+# linkpulse 로컬 전체 스택 (app + Postgres).
+# `docker compose up --build` 한 번으로 로컬에서 끝까지 동작한다(P0 완결).
+# 여기 자격증명은 로컬 전용 더미값이다. 운영 비밀값은 절대 넣지 않는다(가드레일 #2).
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: linkpulse
+      POSTGRES_PASSWORD: linkpulse
+      POSTGRES_DB: linkpulse
+    volumes:
+      # 컨테이너를 내려도 데이터가 유지되도록 볼륨에 저장한다(down -v로 비움).
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # app이 depends_on으로 DB 준비를 기다리게 한다.
+      test: ["CMD-SHELL", "pg_isready -U linkpulse -d linkpulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: ./app
+    environment:
+      # 앱은 compose 네트워크에서 서비스명 db로 Postgres에 접속한다.
+      DATABASE_URL: postgres://linkpulse:linkpulse@db:5432/linkpulse?sslmode=disable
+      # 호스트 매핑 포트와 일치시켜야 short_url이 외부에서 접근 가능한 주소가 된다.
+      PUBLIC_BASE_URL: http://localhost:${APP_HOST_PORT:-8080}
+      APP_PORT: "8080"
+      LOG_LEVEL: info
+    ports:
+      # 호스트 8080이 다른 프로세스(예: Apache)와 충돌하면 APP_HOST_PORT로 바꿔 띄운다:
+      #   APP_HOST_PORT=8088 docker compose up --build
+      - "${APP_HOST_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
