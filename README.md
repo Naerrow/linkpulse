@@ -71,6 +71,14 @@ cd app && go run ./cmd/server
 /load   k6 부하 테스트
 ```
 
+## 인프라 배포 (P1, Terraform)
+
+AWS(ap-northeast-2) ECS Fargate 배포의 상세 런북은 [`infra/README.md`](infra/README.md)에 있습니다. 요약:
+
+- `infra/bootstrap` → state용 S3 버킷, `infra/prod` → 본 인프라(VPC·ALB·ECS·RDS·IAM).
+- **모든 `apply`는 사람이 직접**, **Terraform 1.10+** 필요(S3 네이티브 lockfile, DynamoDB 미사용).
+- 순서: bootstrap apply → prod init → `service_desired_count=0` apply → 이미지 ECR push → `=2` apply.
+
 ## 라이선스
 
 MIT (예정)

@@ -1,0 +1,14 @@
+# `terraform.tfvars`로 복사해 환경값을 채운다(실제 tfvars는 .gitignore). 비밀값은 넣지 않는다.
+
+# 도메인(이미 Route53에 있는 호스팅 영역).
+domain_name = "lpulse.live"
+# hosted_zone_id = "Z0123456789ABCDEFGHIJ"  # 동일 이름 zone이 여러 개일 때만 지정
+
+# 최초 apply는 0(이미지 없음) → 이미지 push 후 2로 올려 재적용.
+service_desired_count = 0
+image_tag             = "bootstrap"
+
+# 비용/사양 조정 예시(기본값으로도 동작).
+# db_instance_class = "db.t4g.micro"
+# task_cpu          = "256"
+# task_memory       = "512"
