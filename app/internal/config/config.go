@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -25,7 +26,9 @@ type Config struct {
 	LogLevel        string // 로그 레벨 (LOG_LEVEL): debug|info|warn|error
 	PublicBaseURL   string // 단축 URL에 붙일 외부 공개 주소 (PUBLIC_BASE_URL)
 	ShortCodeLength int    // 단축 코드 길이 (SHORT_CODE_LENGTH, 기본 7)
-	DatabaseURL     string // Postgres 접속 문자열 (DATABASE_URL). 비어 있으면 인메모리 저장소 사용.
+	// Postgres 접속 문자열. DATABASE_URL이 있으면 그 값을, 없으면 DB_* 개별 변수로
+	// 조립한 값을 담는다. 비어 있으면 인메모리 저장소를 사용한다. (resolveDatabaseURL 참고)
+	DatabaseURL string
 }
 
 // Load는 환경변수를 읽어 Config를 만든다.
@@ -47,13 +50,19 @@ func Load() (Config, error) {
 			minShortCodeLength, maxShortCodeLength, codeLen)
 	}
 
+	// DB 접속 문자열을 해석한다(DATABASE_URL 우선, 없으면 DB_* 조립).
+	dsn, err := resolveDatabaseURL()
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Port:            getEnv("APP_PORT", "8080"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
 		PublicBaseURL:   baseURL,
 		ShortCodeLength: codeLen,
-		// 선택값. 형식 검증은 연결 시점(db.Open의 핑)에서 fail-fast로 처리한다.
-		DatabaseURL: getEnv("DATABASE_URL", ""),
+		// 비어 있으면 main에서 인메모리 저장소로 폴백한다(로컬 개발 편의).
+		DatabaseURL: dsn,
 	}, nil
 }
 
@@ -74,6 +83,66 @@ func validatePublicBaseURL(raw string) error {
 		return fmt.Errorf("PUBLIC_BASE_URL에 호스트가 없습니다: %q", raw)
 	}
 	return nil
+}
+
+// resolveDatabaseURL은 DB 접속 문자열(DSN)을 결정한다.
+//
+// 우선순위:
+//  1. DATABASE_URL이 설정돼 있으면 그대로 사용한다(로컬 docker-compose 하위호환).
+//  2. 아니면 DB_HOST/DB_USER/DB_PASSWORD/DB_NAME으로 URL을 조립한다. 운영(ECS)에서는
+//     비밀번호를 Secrets Manager에서 DB_PASSWORD로만 분리 주입하기 위함이다(가드레일 #2).
+//  3. 핵심 4개가 모두 비어 있으면 빈 문자열을 돌려준다 → 호출부가 인메모리로 폴백한다.
+//
+// 핵심 4개(DB_HOST/DB_USER/DB_PASSWORD/DB_NAME) 중 하나라도 설정되면 4개 전부를 필수
+// 검사하고, 누락된 키를 명시해 에러를 반환한다 — 운영에서 일부만 주입돼 조용히 인메모리로
+// 떠 데이터가 증발하는 사고를 막는다(fail-fast). DB_PORT/DB_SSLMODE는 기본값(5432/require)이
+// 있는 보조값이라 이 트리거에서 제외한다.
+func resolveDatabaseURL() (string, error) {
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		return dsn, nil
+	}
+
+	host := os.Getenv("DB_HOST")
+	user := os.Getenv("DB_USER")
+	password := os.Getenv("DB_PASSWORD")
+	name := os.Getenv("DB_NAME")
+
+	// 핵심 4개가 전부 비면 DB 미설정으로 보고 인메모리로 폴백한다(로컬 개발 편의).
+	if host == "" && user == "" && password == "" && name == "" {
+		return "", nil
+	}
+
+	// 하나라도 설정됐으면 전부 필수 — 어떤 키가 빠졌는지 알려 준다(fail-fast).
+	var missing []string
+	if host == "" {
+		missing = append(missing, "DB_HOST")
+	}
+	if user == "" {
+		missing = append(missing, "DB_USER")
+	}
+	if password == "" {
+		missing = append(missing, "DB_PASSWORD")
+	}
+	if name == "" {
+		missing = append(missing, "DB_NAME")
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("DB 접속 설정이 일부만 지정됐습니다. 누락: %s", strings.Join(missing, ", "))
+	}
+
+	port := getEnv("DB_PORT", "5432")
+	sslmode := getEnv("DB_SSLMODE", "require")
+
+	// url.URL로 조립해 비밀번호의 특수문자를 안전하게 퍼센트 인코딩한다
+	// (RDS가 생성한 비밀번호에 @ / 등이 섞여도 DSN이 깨지지 않게).
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, password),
+		Host:     net.JoinHostPort(host, port),
+		Path:     "/" + name,
+		RawQuery: url.Values{"sslmode": {sslmode}}.Encode(),
+	}
+	return u.String(), nil
 }
 
 // getEnv는 환경변수를 읽되, 비어 있으면 기본값을 돌려준다.

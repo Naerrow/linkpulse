@@ -1,0 +1,178 @@
+# ---- 일반 ----
+variable "region" {
+  description = "AWS 리전."
+  type        = string
+  default     = "ap-northeast-2"
+}
+
+variable "project" {
+  description = "리소스 이름 접두에 쓰는 프로젝트명."
+  type        = string
+  default     = "linkpulse"
+}
+
+variable "environment" {
+  description = "환경명(리소스 접두·태그)."
+  type        = string
+  default     = "prod"
+}
+
+# ---- 도메인 / DNS ----
+variable "domain_name" {
+  description = "서비스 도메인(apex). ACM 인증서·ALB alias·PUBLIC_BASE_URL에 쓰인다."
+  type        = string
+  default     = "lpulse.live"
+}
+
+variable "hosted_zone_id" {
+  description = "기존 Route53 호스팅 영역 ID. 비우면 domain_name으로 조회한다(동일 이름 zone이 여러 개면 ID 지정)."
+  type        = string
+  default     = ""
+}
+
+# ---- 네트워크 ----
+variable "vpc_cidr" {
+  description = "VPC CIDR."
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+variable "public_subnet_cidrs" {
+  description = "퍼블릭 서브넷 CIDR(AZ 수와 같은 길이). ALB·NAT 배치."
+  type        = list(string)
+  default     = ["10.0.0.0/24", "10.0.1.0/24"]
+}
+
+variable "app_subnet_cidrs" {
+  description = "앱(프라이빗) 서브넷 CIDR. ECS 태스크 배치."
+  type        = list(string)
+  default     = ["10.0.10.0/24", "10.0.11.0/24"]
+}
+
+variable "data_subnet_cidrs" {
+  description = "데이터(격리) 서브넷 CIDR. RDS 배치(인터넷 경로 없음)."
+  type        = list(string)
+  default     = ["10.0.20.0/24", "10.0.21.0/24"]
+}
+
+# ---- 앱 / ECS ----
+variable "image_tag" {
+  description = "배포할 ECR 이미지 태그. 최초엔 placeholder, 실제 이미지 push 후 교체."
+  type        = string
+  default     = "bootstrap"
+}
+
+variable "service_desired_count" {
+  description = "ECS 서비스 목표 태스크 수. 최초 apply는 0(이미지 없음), 이미지 push 후 2로 올린다."
+  type        = number
+  default     = 0
+}
+
+variable "task_cpu" {
+  description = "Fargate 태스크 CPU 단위(256 = 0.25 vCPU)."
+  type        = string
+  default     = "256"
+}
+
+variable "task_memory" {
+  description = "Fargate 태스크 메모리(MiB)."
+  type        = string
+  default     = "512"
+}
+
+variable "task_cpu_architecture" {
+  description = "태스크 CPU 아키텍처. ARM64(Graviton, 저렴) 또는 X86_64. 이미지 빌드 아키텍처와 반드시 일치해야 한다."
+  type        = string
+  default     = "ARM64"
+}
+
+variable "log_level" {
+  description = "앱 LOG_LEVEL."
+  type        = string
+  default     = "info"
+}
+
+variable "short_code_length" {
+  description = "앱 SHORT_CODE_LENGTH."
+  type        = number
+  default     = 7
+}
+
+variable "log_retention_days" {
+  description = "CloudWatch 로그 보관 일수."
+  type        = number
+  default     = 14
+}
+
+variable "enable_container_insights" {
+  description = "ECS Container Insights 활성화(관측성↑, 비용↑). P3에서 켤 예정."
+  type        = bool
+  default     = false
+}
+
+variable "enable_alb_access_logs" {
+  description = "ALB 액세스 로그 S3 저장 활성화. 켜려면 alb_access_logs_bucket 필요."
+  type        = bool
+  default     = false
+}
+
+variable "alb_access_logs_bucket" {
+  description = "ALB 액세스 로그를 저장할 기존 S3 버킷 이름(enable_alb_access_logs=true일 때)."
+  type        = string
+  default     = ""
+}
+
+# ---- RDS ----
+variable "db_name" {
+  description = "초기 데이터베이스 이름."
+  type        = string
+  default     = "linkpulse"
+}
+
+variable "db_username" {
+  description = "마스터 사용자명. 비밀번호는 RDS가 Secrets Manager에 생성·관리한다(코드에 두지 않음)."
+  type        = string
+  default     = "linkpulse"
+}
+
+variable "db_instance_class" {
+  description = "RDS 인스턴스 클래스."
+  type        = string
+  default     = "db.t4g.micro"
+}
+
+variable "db_allocated_storage" {
+  description = "RDS 할당 스토리지(GB, gp3 최소 20)."
+  type        = number
+  default     = 20
+}
+
+variable "db_max_allocated_storage" {
+  description = "스토리지 자동확장 상한(GB). 0이면 자동확장 비활성."
+  type        = number
+  default     = 0
+}
+
+variable "postgres_version" {
+  description = "PostgreSQL 메이저 버전(마이너는 RDS가 선택)."
+  type        = string
+  default     = "16"
+}
+
+variable "db_backup_retention" {
+  description = "자동 백업 보관 일수."
+  type        = number
+  default     = 7
+}
+
+variable "db_deletion_protection" {
+  description = "RDS 삭제 보호. 운영은 true 유지."
+  type        = bool
+  default     = true
+}
+
+variable "db_skip_final_snapshot" {
+  description = "삭제 시 최종 스냅샷 생략. 운영은 false(스냅샷 남김)."
+  type        = bool
+  default     = false
+}
