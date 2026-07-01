@@ -57,15 +57,15 @@ variable "data_subnet_cidrs" {
 
 # ---- 앱 / ECS ----
 variable "image_tag" {
-  description = "배포할 ECR 이미지 태그. 최초엔 placeholder, 실제 이미지 push 후 교체."
+  description = "Terraform이 등록하는 baseline/초기 task definition의 이미지 태그. service.task_definition은 ignore_changes라 `terraform apply -var image_tag=<sha>`로는 running 서비스가 이 태그로 옮겨지지 않는다(새 revision만 등록됨). 평상시·비상 배포·롤백은 모두 CI(main push/workflow_dispatch) 또는 직접 `aws ecs update-service`로 한다."
   type        = string
   default     = "bootstrap"
 }
 
 variable "service_desired_count" {
-  description = "ECS 서비스 목표 태스크 수. 최초 apply는 0(이미지 없음), 이미지 push 후 2로 올린다."
+  description = "ECS 서비스 목표 태스크 수(운영 정상값 2). 최초 부트스트랩(이미지 없음) 때만 -var service_desired_count=0으로 인프라를 먼저 만든다."
   type        = number
-  default     = 0
+  default     = 2
 }
 
 variable "task_cpu" {
@@ -175,4 +175,11 @@ variable "db_skip_final_snapshot" {
   description = "삭제 시 최종 스냅샷 생략. 운영은 false(스냅샷 남김)."
   type        = bool
   default     = false
+}
+
+# ---- GitHub OIDC / CI(P2) ----
+variable "existing_github_oidc_provider_arn" {
+  description = "계정에 이미 있는 GitHub Actions OIDC 공급자(token.actions.githubusercontent.com) ARN. 비우면 새로 만든다. apply 전 `aws iam list-open-id-connect-providers`로 확인해 이미 있으면 그 ARN을 지정한다(중복 생성 EntityAlreadyExists 회피)."
+  type        = string
+  default     = ""
 }

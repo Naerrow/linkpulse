@@ -4,11 +4,19 @@
 domain_name = "lpulse.live"
 # hosted_zone_id = "Z0123456789ABCDEFGHIJ"  # 동일 이름 zone이 여러 개일 때만 지정
 
-# 최초 apply는 0(이미지 없음) → 이미지 push 후 2로 올려 재적용.
-service_desired_count = 0
-image_tag             = "bootstrap"
+# 운영 중 안전 기본값: 태스크 2개(무인자 apply가 prod를 0으로 떨구지 않게).
+# 단 최초 부트스트랩(이미지가 ECR에 없음)에는 그대로 apply하지 말고 -var service_desired_count=0으로
+# 인프라를 먼저 만든다(README "배포 순서" 참고).
+service_desired_count = 2
+# 부트스트랩 placeholder. 가동 후 운영 이미지는 CI(P2)가 git sha로 배포하므로,
+# 수동 apply 시에는 현재 라이브 태그(예: v1)로 맞춘다.
+image_tag = "bootstrap"
 
 # 비용/사양 조정 예시(기본값으로도 동작).
 # db_instance_class = "db.t4g.micro"
 # task_cpu          = "256"
 # task_memory       = "512"
+
+# GitHub OIDC 공급자가 계정에 이미 있으면(다른 프로젝트 등) 그 ARN을 지정한다(없으면 비워둠 → 새로 생성).
+# apply 전 `aws iam list-open-id-connect-providers`로 확인.
+# existing_github_oidc_provider_arn = "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
