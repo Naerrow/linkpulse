@@ -17,9 +17,9 @@ jobs:
       run:
         working-directory: app # Makefile과 go 모듈이 app/ 아래(모노레포)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: app/go.mod # go.mod의 go 지시문과 자동 동기(버전 드리프트 방지)
           cache-dependency-path: app/go.sum # 캐시 키는 repo 루트 기준 경로
