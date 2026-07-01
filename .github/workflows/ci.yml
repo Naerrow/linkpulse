@@ -1,0 +1,41 @@
+# PR 검증 + deploy.yml이 재사용(workflow_call)하는 Go/Docker 체크.
+# push 트리거는 두지 않는다 — main push는 deploy.yml이 이 워크플로를 호출하므로 중복 실행을 막는다.
+name: ci
+
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  go-checks:
+    name: Go vet / test / fmt
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app # Makefile과 go 모듈이 app/ 아래(모노레포)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: app/go.mod # go.mod의 go 지시문과 자동 동기(버전 드리프트 방지)
+          cache-dependency-path: app/go.sum # 캐시 키는 repo 루트 기준 경로
+
+      - name: gofmt 검사
+        run: test -z "$(gofmt -l .)" || { echo "gofmt 필요:"; gofmt -l .; exit 1; }
+
+      - name: go vet
+        run: make vet
+
+      - name: 단위 테스트
+        run: make test
+
+      # Dockerfile smoke test: PR에서만 멀티스테이지 빌드 성공을 확인한다(push 안 함).
+      # working-directory가 app이라 build context는 현재 디렉터리(.)이다.
+      # arm64 최종 이미지 검증은 deploy.yml의 arm 러너가 담당한다.
+      - name: Docker 빌드 검증
+        if: github.event_name == 'pull_request'
+        run: docker build -t linkpulse-app:ci .
