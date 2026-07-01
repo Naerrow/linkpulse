@@ -98,5 +98,13 @@ resource "aws_ecs_service" "app" {
   # 타깃그룹이 리스너에 연결된 뒤 서비스를 생성한다.
   depends_on = [aws_lb_listener.https]
 
+  # 앱 이미지 배포는 CI(P2)가 register-task-definition + update-service로 수행하므로,
+  # service가 가리키는 task_definition 리비전 변경을 Terraform이 되돌리지 않게 한다.
+  # 함정: Terraform으로 task definition(DB env 등)을 바꿔도 running 서비스엔 곧장 반영되지 않고,
+  # 다음 CI 배포가 1회 돌아야 라이브에 적용된다(docs/adr/0001-cicd-terraform-ci-boundary.md 참고).
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+
   tags = { Name = "${local.name_prefix}-app" }
 }

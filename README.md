@@ -77,7 +77,8 @@ AWS(ap-northeast-2) ECS Fargate 배포의 상세 런북은 [`infra/README.md`](i
 
 - `infra/bootstrap` → state용 S3 버킷, `infra/prod` → 본 인프라(VPC·ALB·ECS·RDS·IAM).
 - **모든 `apply`는 사람이 직접**, **Terraform 1.10+** 필요(S3 네이티브 lockfile, DynamoDB 미사용).
-- 순서: bootstrap apply → prod init → `service_desired_count=0` apply → 이미지 ECR push → `=2` apply.
+- 순서: bootstrap apply → prod init → `-var service_desired_count=0` apply → GitHub Variables 등록 → CI(GitHub Actions)가 이미지 빌드·배포 → `apply`로 desired=2.
+- **이미지 배포는 GitHub Actions(P2)가, `terraform apply`는 인프라·스케일만** 담당합니다(경계: [`docs/adr/0001-cicd-terraform-ci-boundary.md`](docs/adr/0001-cicd-terraform-ci-boundary.md)).
 
 ## 라이선스
 

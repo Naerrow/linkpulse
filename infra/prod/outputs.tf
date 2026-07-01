@@ -32,3 +32,19 @@ output "cloudwatch_log_group" {
   description = "앱 로그 그룹."
   value       = aws_cloudwatch_log_group.app.name
 }
+
+# ---- P2 CI/CD용 (GitHub repo Variables에 등록) ----
+output "github_actions_role_arn" {
+  description = "GitHub Actions가 OIDC로 assume하는 배포 role ARN. GitHub repo Variable AWS_DEPLOY_ROLE_ARN."
+  value       = aws_iam_role.github_actions_deploy.arn
+}
+
+output "ecs_task_definition_family" {
+  description = "ECS task definition family. CI가 describe-task-definition base로 사용. GitHub Variable ECS_TASK_DEFINITION_FAMILY."
+  value       = aws_ecs_task_definition.app.family
+}
+
+output "ecr_repository_name" {
+  description = "ECR 리포지토리 이름(URL 아님). aws ecr describe-images --repository-name용. GitHub Variable ECR_REPOSITORY_NAME."
+  value       = aws_ecr_repository.app.name
+}
