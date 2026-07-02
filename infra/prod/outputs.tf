@@ -48,3 +48,14 @@ output "ecr_repository_name" {
   description = "ECR 리포지토리 이름(URL 아님). aws ecr describe-images --repository-name용. GitHub Variable ECR_REPOSITORY_NAME."
   value       = aws_ecr_repository.app.name
 }
+
+# ---- P3 관측성/알림 ----
+output "sns_alarms_topic_arn" {
+  description = "알람 통지 SNS 토픽 ARN. Chatbot/이메일 등 구독 연결용."
+  value       = aws_sns_topic.alarms.arn
+}
+
+output "slack_alerts_enabled" {
+  description = "Slack 통지 배선 설정 여부(slack_team_id/slack_channel_id 둘 다 설정 시 true). 실제 SNS 구독 존재는 list-subscriptions-by-topic로 확인. P3-1 완료 판정 보조."
+  value       = local.slack_enabled
+}
