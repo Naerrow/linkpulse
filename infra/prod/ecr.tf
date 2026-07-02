@@ -1,7 +1,7 @@
 resource "aws_ecr_repository" "app" {
   name                 = "${var.project}/app"
   image_tag_mutability = "MUTABLE" # CI는 git sha 태그를 쓴다(사실상 불변). 동일 태그는 preflight로 재푸시 skip(멱등)이라 MUTABLE 유지.
-  force_delete         = false
+  force_delete         = var.ecr_force_delete
 
   image_scanning_configuration {
     scan_on_push = true # push 시 취약점 스캔

@@ -16,6 +16,10 @@ image_tag = "bootstrap"
 # db_instance_class = "db.t4g.micro"
 # task_cpu          = "256"
 # task_memory       = "512"
+#
+# 개발 비용 절감을 위해 prod 스택을 완전히 지울 때만 true로 넘긴다.
+# 평상시 terraform.tfvars에는 넣지 않는다. scripts/full-destroy-prod.sh가 명시적으로 true를 전달한다.
+# ecr_force_delete = true
 
 # GitHub OIDC 공급자가 계정에 이미 있으면(다른 프로젝트 등) 그 ARN을 지정한다(없으면 비워둠 → 새로 생성).
 # apply 전 `aws iam list-open-id-connect-providers`로 확인.

@@ -122,6 +122,12 @@ variable "alb_access_logs_bucket" {
   default     = ""
 }
 
+variable "ecr_force_delete" {
+  description = "ECR repo 삭제 시 이미지까지 강제 삭제할지 여부. 개발용 full destroy 때만 true로 넘긴다."
+  type        = bool
+  default     = false
+}
+
 # ---- RDS ----
 variable "db_name" {
   description = "초기 데이터베이스 이름."
