@@ -12,6 +12,10 @@ resource "aws_db_parameter_group" "main" {
   parameter {
     name  = "rds.force_ssl"
     value = "1"
+    # AWS가 이 파라미터의 ApplyMethod를 pending-reboot로 보고해(provider 기본 immediate와 불일치)
+    # 매 plan마다 가짜 drift가 잡힌다 → 보고값에 맞춰 명시(값·SSL 강제 불변, apply 시 API 호출 없음).
+    # dynamic 파라미터라 나중에 값을 바꿀 땐 immediate로 바꾸면 재부팅 없이 즉시 적용된다.
+    apply_method = "pending-reboot"
   }
 
   lifecycle {

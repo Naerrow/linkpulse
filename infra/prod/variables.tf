@@ -105,9 +105,9 @@ variable "log_retention_days" {
 }
 
 variable "enable_container_insights" {
-  description = "ECS Container Insights 활성화(관측성↑, 비용↑). P3에서 켤 예정."
+  description = "ECS Container Insights 활성화(관측성↑, 비용↑). P3에서 켬 — RunningTaskCount 등 태스크 레벨 메트릭 확보. 끄려면 tfvars에서 false."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "enable_alb_access_logs" {
@@ -120,6 +120,12 @@ variable "alb_access_logs_bucket" {
   description = "ALB 액세스 로그를 저장할 기존 S3 버킷 이름(enable_alb_access_logs=true일 때)."
   type        = string
   default     = ""
+}
+
+variable "ecr_force_delete" {
+  description = "ECR repo 삭제 시 이미지까지 강제 삭제할지 여부. 개발용 full destroy 때만 true로 넘긴다."
+  type        = bool
+  default     = false
 }
 
 # ---- RDS ----
@@ -182,4 +188,27 @@ variable "existing_github_oidc_provider_arn" {
   description = "계정에 이미 있는 GitHub Actions OIDC 공급자(token.actions.githubusercontent.com) ARN. 비우면 새로 만든다. apply 전 `aws iam list-open-id-connect-providers`로 확인해 이미 있으면 그 ARN을 지정한다(중복 생성 EntityAlreadyExists 회피)."
   type        = string
   default     = ""
+}
+
+# ---- 모니터링 / Slack 알림 (P3) ----
+# CloudWatch 알람 → SNS → AWS Chatbot(Amazon Q Developer in chat applications) → Slack.
+# 두 값은 콘솔에서 Slack workspace를 OAuth 승인한 뒤 확보하는 "식별자"다(비밀값 아님).
+# 둘 다 비우면 알람+SNS만 만들고 Slack 배선은 스킵한다(중간 마일스톤).
+variable "slack_team_id" {
+  description = "Slack workspace(team) ID. 콘솔 Amazon Q Developer in chat applications에서 OAuth 승인 후 확보. 비우면 Slack 통지 스킵."
+  type        = string
+  default     = ""
+}
+
+variable "slack_channel_id" {
+  description = "통지받을 Slack 채널 ID(채널명 아님, 예: C0123ABCDEF). 채널에서 `/invite @Amazon Q` 필요."
+  type        = string
+  default     = ""
+
+  # slack_team_id/slack_channel_id는 둘 다 채우거나 둘 다 비워야 한다(한쪽만=실수).
+  # count 게이트가 부분 생성은 이미 막지만, 조용한 스킵 대신 apply 전 명확한 에러를 낸다.
+  validation {
+    condition     = (trimspace(var.slack_team_id) == "") == (trimspace(var.slack_channel_id) == "")
+    error_message = "Set both slack_team_id and slack_channel_id, or neither."
+  }
 }

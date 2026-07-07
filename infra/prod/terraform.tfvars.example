@@ -16,7 +16,22 @@ image_tag = "bootstrap"
 # db_instance_class = "db.t4g.micro"
 # task_cpu          = "256"
 # task_memory       = "512"
+#
+# 개발 비용 절감을 위해 prod 스택을 완전히 지울 때만 true로 넘긴다.
+# 평상시 terraform.tfvars에는 넣지 않는다. scripts/full-destroy-prod.sh가 명시적으로 true를 전달한다.
+# ecr_force_delete = true
 
 # GitHub OIDC 공급자가 계정에 이미 있으면(다른 프로젝트 등) 그 ARN을 지정한다(없으면 비워둠 → 새로 생성).
 # apply 전 `aws iam list-open-id-connect-providers`로 확인.
 # existing_github_oidc_provider_arn = "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+
+# ---- 모니터링 / Slack 알림 (P3) ----
+# Container Insights는 default true(P3). 끄려면 아래 주석을 해제한다(비용 소폭↓, 태스크 레벨 메트릭 상실).
+# enable_container_insights = false
+#
+# Slack 통지: AWS 콘솔 "Amazon Q Developer in chat applications"에서 workspace를 OAuth 승인한 뒤
+# team/channel ID를 넣는다(둘 다 필수 — 한쪽만 넣으면 apply 전 validation 에러). 채널 ID는 채널명이 아니라
+# 우클릭→링크 복사 끝의 문자열(예: C0123ABCDEF). 승인 후 Slack 채널에서 `/invite @Amazon Q` 실행 필요.
+# 준비 전이면 둘 다 비워 알람+SNS만 먼저 apply한다(Slack 배선 스킵).
+# slack_team_id    = "T0123ABCD"
+# slack_channel_id = "C0123ABCDEF"
