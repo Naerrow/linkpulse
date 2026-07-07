@@ -2,7 +2,7 @@
 
 - 날짜: 2026-07-02
 - Phase: **P3 (관측성)** — 이번 범위는 **P3-2: 의도적 장애 → 감지·대응 실증 → 회고(runbook)**
-- 상태: **검토 완료(3차, 2026-07-03) — Step 1 산출물 작성됨.** 드릴(Step 2)은 Step 0 잔여(Slack 배선·수신 실증·P3-1 머지) 완료 후.
+- 상태: **완료 — P3-2 종결(2026-07-06).** GameDay 드릴(S1·S2·S3) 실측 완료, 회고 확정([`../postmortems/2026-07-06-gameday-01-retro.md`](../postmortems/2026-07-06-gameday-01-retro.md)). Step 0~3 전부 이행(§5·§6). 드릴 재개용 별도 계획(0004)은 폐기 — **P3-2는 이 문서에서 끝난다.** (남은 P3 마무리는 커밋·PR + P3-1 머지 — 사용자.)
 - 브랜치: 계획 시점은 `infra/p3-cloudwatch-slack-alerts`(P3-1). 드릴 산출물은 P3-1 머지 후 `infra/p3-2-fault-injection`에서.
 - 관련: [`docs/plans/0002-p3-observability.md`](0002-p3-observability.md)(P3-1), [`docs/adr/0002-alerting-design.md`](../adr/0002-alerting-design.md)
 
@@ -65,7 +65,7 @@ P3-1이 감지·통지 배선(알람 12 + SNS + Chatbot→Slack)을 만들었다
 - **Step 0 — P3-1 완료 게이트 (사용자)**: plan 확인 → apply → Slack OAuth·tfvars → 재apply → 알람 12+chatbot 확인 → `set-alarm-state` 테스트로 Slack 수신 확인 → PR·머지. 상세는 plans/0002 §6·`infra/README.md`. **Slack 통지가 실제로 와야 드릴 의미가 있다.**
 - **Step 1 — 준비 (Claude 작성, 이 계획 검토 통과 후)**: 새 브랜치에서 ① runbook 초안 `docs/runbooks/alarm-response.md`(**12개 알람 전수**: 의미/심각도/1차 확인 명령/복구 절차/오탐 시 튜닝) ② `load/chaos/Dockerfile`+README(빌드는 **`--platform linux/arm64` 명시** → 로컬 검증: `docker run` 후 `curl -i localhost:8080/healthz` 404 확인 → push → **`docker buildx imagetools inspect <ECR>:chaos-healthz-v1`로 아키텍처=arm64 확인**까지가 완료 조건 — §2 ARM64 리스크의 이중 차단) ③ 회고 템플릿 `docs/postmortems/TEMPLATE.md` ④ 예측표(§4)를 기록지로. — **드릴 전에 runbook 초안이 있어야 "따라 하는" 리허설이 된다.**
 - **Step 2 — GameDay (사용자 실행 + Claude 관측)**: **B-1 기준선 기록**(현재 서빙 taskdef ARN·리비전·이미지 태그를 `describe-services`→`describe-task-definition`으로 기록하고, 그 태그가 ECR에 존재함을 `describe-images`로 확인 = **수동 롤백 대상 확정, S1의 사전 게이트**) → **B-2** 전 알람 상태 정상·Slack 배선 동작 확인 → S1 → 안정화 확인 → S2 → 복구 확인 → (S3) → 증거 수집(alarm history·서비스 이벤트·run 링크·Slack 캡처·타임스탬프).
-- **Step 3 — 회고·확정 (Claude 초안, 사용자 확정)**: `docs/postmortems/2026-07-XX-gameday-01.md`(타임라인, 예측 vs 실측 표, MTTD/MTTR, 잘 된 것/사각지대, 액션 아이템) → runbook에 실측 반영 → 액션 아이템 각각 반영 커밋 or 백로그 판정 → PR.
+- **Step 3 — 회고·확정 (완료 2026-07-06)**: 기록지 [`2026-07-06-gameday-01.md`](../postmortems/2026-07-06-gameday-01.md) + 회고 [`2026-07-06-gameday-01-retro.md`](../postmortems/2026-07-06-gameday-01-retro.md)(예측 vs 실측, MTTD 3분37초/MTTR 3분34초/총다운 7분11초, 액션 아이템 A-1~A-10 전수 판정) 확정. runbook `alarm-response.md`에 실측 반영 완료(A-6·A-8·A-9), chaos README·치트시트에 A-4·A-7. 커밋·PR은 사용자. **← P3-2(=P3) 여기서 종결.**
 
 ## 6. 완료 조건 (P3-2 = P3 종료)
 
