@@ -17,7 +17,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
    curl -sk -o /dev/null -w '%{http_code}\n' --max-time 5 https://lpulse.live/healthz
    ```
    - `200` → 영향 없음/미미. 침착하게 해당 알람 절로.
-   - `503`/timeout → **다운. §1(no-healthy-hosts) 절차로 직행.**
+   - `503`/timeout → **다운. 먼저 `alb-elb-5xx`(§2)와 0-4의 `describe-services`(desired/running)를 본다.** GameDay 실측(2026-07-06): 전면 다운 시 **실제로 가장 먼저·일관되게 울린 건 `alb-elb-5xx`**(MTTD 3~5분)였고, `no-healthy-hosts`(§1)·`running-tasks-low`(§8)는 **늦거나(복구 후) 아예 침묵**했다. 단 이 우선순위는 **트래픽(또는 healthz 폴링 같은 synthetic 요청)이 있는 다운** 한정 — 진짜 무트래픽 다운이면 5xx 자체가 안 생기므로 그때는 §1이 유일한 방어선이다(그 신뢰성은 미검증, 회고 A-5).
 3. **비정상 알람 전수 확인** (동반 알람 조합이 원인을 말해준다):
    ```bash
    aws cloudwatch describe-alarms --alarm-name-prefix linkpulse-prod \
@@ -57,19 +57,21 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 
 ### §1 `linkpulse-prod-alb-no-healthy-hosts` — 정상 타깃 0 = 서비스 다운
 
-- **의미**: 타깃그룹에 healthy 타깃이 3분간 없거나, **지표 자체가 소실**(타깃 전원 deregister — `treat_missing=breaching` 설계). 무트래픽에서도 울리는 최종 방어선 — **이 알람이 울리면 진짜 다운이다.**
+- **의미**: 타깃그룹에 healthy 타깃이 3분간 없거나, **지표 자체가 소실**(타깃 전원 deregister — `treat_missing=breaching` 설계). 무트래픽에서도 울리도록 설계한 최종 방어선. **이 알람이 울리면 진짜 다운이지만, 그 역(다운이면 이 알람이 곧 울린다)은 실측상 성립하지 않았다** — GameDay(2026-07-06) 전면 다운 2회에서 이 알람은 9분48초 만에(복구 후) 울리거나 아예 미발화했다. **즉 빠른 MTTD 신호로 신뢰하지 말 것** — 다운 감지는 `alb-elb-5xx`(§2)가 먼저 한다. (이 지연/미발화의 원인 규명·튜닝은 회고 A-5 백로그.)
 - **먼저**: 공통 0-2(대개 503)·0-4. `desired`/`running` 숫자가 첫 갈림길.
 - **원인 → 복구**:
   1. **desired=0** (사람 실수, 드릴 뒤 복원 누락): 0-4에서 `desired: 0` → **R-2**. 복구 ~2–3분.
   2. **전 태스크 반복 크래시/기동 실패**: `running`이 0이거나 요동, events에 "stopped"/"unable to place" → **R-6**으로 exit code·사유 확인 → 앱 문제면 §3과 동일 진단, 직전 배포가 원인이면 **R-1**.
   3. **배포 전멸 + 자동 롤백도 실패**: deployments에 FAILED만 남음 — 이때 배포 run이 안정화 대기로 아직 살아 있을 공산이 크다 → **R-1e가 1순위**(R-1 dispatch는 큐 대기), run 종료를 확인했다면 R-1(기준선 태그).
   4. 위 전부 정상인데 unhealthy만 지속: 헬스체크 경로 자체 문제(SG·TG 설정 변경 여부, 최근 apply 확인) → **R-5**로 사유(`Target.ResponseCodeMismatch` 등) 확인.
-- **해소 확인**: healthy 2 회복(R-5) + healthz 연속 200 + Slack OK 통지. **MTTR 기록.**
+- **해소 확인**: healthy 2 회복(R-5) + healthz 연속 200 + `describe-services`의 `running=desired`로 **직접 판정**. **Slack OK 통지는 회복 기준으로 쓰지 말 것**(§2 실측: `alb-elb-5xx` OK가 복구 후 최대 17분 지연 — A-9), OK 수신 시각은 별도 병기만. **MTTR(첫 ALARM→정상) 기록.**
 - **튜닝**: 오탐 여지 거의 없음(설계 의도). 유지.
 
 ### §2 `linkpulse-prod-alb-elb-5xx` — ALB 자신이 낸 5xx ≥5/5분
 
 - **의미**: 요청이 타깃까지 못 갔다 — 503(정상 타깃 없음)·502(타깃 연결 거부/비정상 응답)·504(타임아웃). 사용자에게 오류가 **보이고 있다**. dimension이 LB 전용이라 타깃 5xx(§3)와 구분된다.
+- **전면 다운의 1순위 신호(실측)**: GameDay 2회 모두 이 알람이 전면 다운을 **가장 먼저**(MTTD 3분37초·4분54초) 감지했다 — 503이 뜨면 §1보다 이 절을 먼저 본다(단 트래픽/synthetic 요청이 있을 때. 무트래픽이면 5xx가 없어 이 알람도 안 뜬다 → §1).
+- **⚠ OK 통지는 신뢰하지 말 것(회복 판정용 아님)**: 이 지표(`HTTPCode_ELB_5XX_Count`)는 **sparse 카운트**(5xx=0이면 데이터포인트 부재)라, 복구 후 missing→`notBreaching` 확정에 시간이 크게 걸린다 — 실측 OK 지연이 **복구 후 2분49초~17분26초**로 편차가 컸다. **회복 여부는 OK 알림을 기다리지 말고 `curl .../healthz`=200 + 0-4의 `running=desired`로 직접 확인**(MTTR 기준점). (회고 A-9)
 - **먼저**: §1 동반 여부(0-3) — 동반이면 §1 절차가 곧 복구. 단독이면:
   - **502 위주**: 태스크가 죽는 순간의 잔여 연결 가능성 → 0-4 events·R-6(방금 태스크 교체가 있었나), R-5.
   - **504 위주**: 앱이 느리다 → §5(p95)와 §9(RDS CPU) 확인.
@@ -99,7 +101,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
   1. **나쁜 이미지/기동 실패**(배포 직후): circuit breaker가 롤백 중인지 deployments의 `rolloutState` 확인 — 롤백 중이면 개입하지 말고 완료 대기(S1 드릴 실증 경로), 실패면 **사용자 영향+run 진행 중일 땐 R-1e**(dispatch는 큐 대기), 아니면 R-1.
   2. **OOM 반복**(exit 137, §7 동반): **R-3** 후 task_memory 상향 검토(Terraform+CI 1회 — ADR 0001 함정).
   3. **이미지 pull 실패**: ECR 태그 존재 확인(`aws ecr describe-images ...`) → 없으면 **R-1**(존재하는 태그로).
-- **한계(설계 인지)**: 태스크가 **0**이 되면 지표 자체가 끊겨 INSUFFICIENT_DATA로 **침묵**할 수 있다(`treat_missing=missing`) — 전면 다운의 방어선은 이 알람이 아니라 §1이다. (GameDay S2의 관찰 질문 P8 — 실측 후 이 줄을 갱신한다.)
+- **한계(GameDay 2026-07-06 실측 반영)**: 전면 다운(desired=0) 2회에서 이 알람은 **다운 지속시간에 좌우**됐다 — 9분대 다운에선 **복구 완료 후 17초 뒤에야** ALARM(Container Insights 지표 발행 지연), 7분대 다운에선 **아예 미발화**. 즉 실시간 다운 감지용으로 신뢰 불가이며, **전면 다운 방어선은 이 알람도 §1도 아니고 실측상 `alb-elb-5xx`(§2)였다**. 이 알람이 뜨면 **먼저 0-4 `describe-services`로 현재 desired/running부터 확인**할 것 — 이미 복구된 장애를 진행 중으로 오인하지 않도록(뒤늦게 오는 특성). (회고 A-6, 원 예측 P8)
 - **튜닝**: 오토스케일링 도입으로 desired가 가변이 되면 임계 재설계(ADR 0002 §결과).
 
 ### §10 `linkpulse-prod-rds-free-storage-low` — 여유 스토리지 ≤10%(2GB)
