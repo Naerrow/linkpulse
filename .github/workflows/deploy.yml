@@ -25,12 +25,15 @@ env:
   AWS_REGION: ap-northeast-2
 
 jobs:
-  # 배포 파라미터 결정: 신규(현재 sha 빌드) vs 롤백(기존 태그 재배포).
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.vars.outputs.image_tag }}
-      build_image: ${{ steps.vars.outputs.build_image }}
+  deploy:
+    # main ref에서만 배포한다(OIDC trust도 main 한정).
+    if: github.ref == 'refs/heads/main'
+    # 한 runner에서 검증→빌드→배포까지 이어 간다. GitHub-hosted runner 장애 때 job을 여러 번
+    # 새로 배정받는 구조(setup/checks/deploy 분리)는 실패 표면을 키우므로 단일 job으로 둔다.
+    runs-on: ubuntu-latest # x86 GA 러너(신뢰성·용량↑). arm64 이미지는 buildx로 크로스컴파일한다(ADR 0001).
+    env:
+      ECR_URL: ${{ vars.ECR_REPOSITORY_URL }}
+      ECR_NAME: ${{ vars.ECR_REPOSITORY_NAME }}
     steps:
       - id: vars
         env:
@@ -45,34 +48,38 @@ jobs:
             fi
             echo "image_tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
             echo "build_image=false" >> "$GITHUB_OUTPUT"
+            echo "IMAGE_TAG=$INPUT_TAG" >> "$GITHUB_ENV"
+            echo "BUILD_IMAGE=false" >> "$GITHUB_ENV"
           else
             echo "image_tag=$SHA" >> "$GITHUB_OUTPUT"
             echo "build_image=true" >> "$GITHUB_OUTPUT"
+            echo "IMAGE_TAG=$SHA" >> "$GITHUB_ENV"
+            echo "BUILD_IMAGE=true" >> "$GITHUB_ENV"
           fi
 
-  # 코드 검증. 롤백(기존 이미지 재배포)일 땐 새 코드가 없으므로 건너뛴다.
-  checks:
-    needs: setup
-    if: needs.setup.outputs.build_image == 'true'
-    uses: ./.github/workflows/ci.yml
-
-  deploy:
-    needs: [setup, checks]
-    # checks가 (롤백으로) skip돼도 배포는 진행. 단 main ref에서만(OIDC trust가 main 한정이라
-    # 다른 ref의 workflow_dispatch는 assume 자체가 실패하므로 미리 차단).
-    if: |
-      always() &&
-      github.ref == 'refs/heads/main' &&
-      needs.setup.result == 'success' &&
-      (needs.setup.outputs.build_image == 'false' || needs.checks.result == 'success')
-    runs-on: ubuntu-latest # x86 GA 러너(신뢰성·용량↑). arm64 이미지는 buildx로 크로스컴파일한다(ADR 0001).
-    env:
-      IMAGE_TAG: ${{ needs.setup.outputs.image_tag }}
-      BUILD_IMAGE: ${{ needs.setup.outputs.build_image }}
-      ECR_URL: ${{ vars.ECR_REPOSITORY_URL }}
-      ECR_NAME: ${{ vars.ECR_REPOSITORY_NAME }}
-    steps:
       - uses: actions/checkout@v5
+
+      # 코드 검증. 롤백(기존 이미지 재배포)일 땐 새 코드가 없으므로 건너뛴다.
+      - uses: actions/setup-go@v6
+        if: steps.vars.outputs.build_image == 'true'
+        with:
+          go-version-file: app/go.mod
+          cache-dependency-path: app/go.sum
+
+      - name: gofmt 검사
+        if: steps.vars.outputs.build_image == 'true'
+        working-directory: app
+        run: test -z "$(gofmt -l .)" || { echo "gofmt 필요:"; gofmt -l .; exit 1; }
+
+      - name: go vet
+        if: steps.vars.outputs.build_image == 'true'
+        working-directory: app
+        run: make vet
+
+      - name: 단위 테스트
+        if: steps.vars.outputs.build_image == 'true'
+        working-directory: app
+        run: make test
 
       - uses: aws-actions/configure-aws-credentials@v6
         with:
