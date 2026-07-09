@@ -65,7 +65,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       needs.setup.result == 'success' &&
       (needs.setup.outputs.build_image == 'false' || needs.checks.result == 'success')
-    runs-on: ubuntu-24.04-arm # task가 ARM64라 네이티브 빌드(public preview; 장애 시 ADR의 x86+QEMU fallback)
+    runs-on: ubuntu-latest # x86 GA 러너(신뢰성·용량↑). arm64 이미지는 buildx로 크로스컴파일한다(ADR 0001).
     env:
       IMAGE_TAG: ${{ needs.setup.outputs.image_tag }}
       BUILD_IMAGE: ${{ needs.setup.outputs.build_image }}
@@ -80,6 +80,9 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: aws-actions/amazon-ecr-login@v2
+
+      # arm64 크로스빌드용 buildx 빌더(docker-container 드라이버). x86 러너에서 --platform 빌드를 가능케 한다.
+      - uses: docker/setup-buildx-action@v3
 
       # preflight: 태그가 ECR에 이미 있으면 빌드 skip(멱등, 같은 sha 재실행 시 재사용).
       # 롤백인데 태그가 없으면 실패시킨다(lifecycle 보관 범위 밖으로 만료됐을 수 있음).
@@ -96,13 +99,12 @@ jobs:
             fi
           fi
 
-      # 신규 배포이고 아직 없을 때만 빌드·푸시. context는 repo 루트 기준 app.
-      - name: 빌드 & 푸시 (arm64)
+      # 신규 배포이고 아직 없을 때만 빌드·푸시. x86 러너에서 arm64로 크로스컴파일(buildx가 빌드+푸시 동시).
+      - name: 빌드 & 푸시 (arm64 크로스컴파일)
         if: env.BUILD_IMAGE == 'true' && steps.preflight.outputs.exists == 'false'
         run: |
           set -euo pipefail
-          docker build -t "$ECR_URL:$IMAGE_TAG" app
-          docker push "$ECR_URL:$IMAGE_TAG"
+          docker buildx build --platform linux/arm64 -t "$ECR_URL:$IMAGE_TAG" --push app
 
       # family의 최신 active task def를 base로 받아 register 입력에 맞게 불변 필드를 제거한다.
       - name: task definition 받기
