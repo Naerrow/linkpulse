@@ -33,9 +33,14 @@ jobs:
       - name: 단위 테스트
         run: make test
 
-      # Dockerfile smoke test: PR에서만 멀티스테이지 빌드 성공을 확인한다(push 안 함).
+      # Dockerfile smoke test: PR에서 배포와 동일한 arm64 크로스빌드가 x86에서 성공하는지 확인한다.
+      # deploy.yml이 x86 GA 러너 + buildx로 arm64를 크로스컴파일하므로(ADR 0001), 그 경로를 여기서
+      # 미리 검증해 조용한 회귀를 막는다. --push/--load 없이 빌드만 해 성공 여부만 본다.
       # working-directory가 app이라 build context는 현재 디렉터리(.)이다.
-      # arm64 최종 이미지 검증은 deploy.yml의 arm 러너가 담당한다.
-      - name: Docker 빌드 검증
+      - name: buildx 준비
         if: github.event_name == 'pull_request'
-        run: docker build -t linkpulse-app:ci .
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker arm64 크로스빌드 검증
+        if: github.event_name == 'pull_request'
+        run: docker buildx build --platform linux/arm64 -t linkpulse-app:ci .
