@@ -36,6 +36,8 @@ resource "aws_ecs_task_definition" "app" {
       # 비밀번호를 제외한 설정은 평문 env로. host/port/name/user는 RDS 속성에서 가져온다.
       environment = [
         { name = "APP_PORT", value = "8080" },
+        # 운영 모드: DB 미설정 시 인메모리 폴백을 막고 기동을 중단시킨다(app/internal/config).
+        { name = "APP_ENV", value = "production" },
         { name = "LOG_LEVEL", value = var.log_level },
         { name = "PUBLIC_BASE_URL", value = "https://${var.domain_name}" },
         { name = "SHORT_CODE_LENGTH", value = tostring(var.short_code_length) },

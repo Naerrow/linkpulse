@@ -26,10 +26,20 @@ type Config struct {
 	LogLevel        string // 로그 레벨 (LOG_LEVEL): debug|info|warn|error
 	PublicBaseURL   string // 단축 URL에 붙일 외부 공개 주소 (PUBLIC_BASE_URL)
 	ShortCodeLength int    // 단축 코드 길이 (SHORT_CODE_LENGTH, 기본 7)
+	// 실행 환경 (APP_ENV): ""(기본=development)|development|production.
+	// production이면 DB 미설정 시 인메모리 폴백을 금지하고 기동을 중단한다(Load 참고).
+	AppEnv string
 	// Postgres 접속 문자열. DATABASE_URL이 있으면 그 값을, 없으면 DB_* 개별 변수로
 	// 조립한 값을 담는다. 비어 있으면 인메모리 저장소를 사용한다. (resolveDatabaseURL 참고)
 	DatabaseURL string
 }
+
+// 인식되는 APP_ENV 값. 그 외(예: "prod" 오타)는 fail-fast로 막아
+// 가드가 조용히 비활성화되는 footgun을 방지한다.
+const (
+	envDevelopment = "development"
+	envProduction  = "production"
+)
 
 // Load는 환경변수를 읽어 Config를 만든다.
 // 잘못된 값은 에러를 반환해 기동을 중단시킨다(fail-fast) — 운영 중 조용히 깨진 응답을
@@ -56,11 +66,26 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// 실행 환경을 확인한다. 빈 값은 development(로컬 편의)로 본다.
+	appEnv := os.Getenv("APP_ENV")
+	switch appEnv {
+	case "", envDevelopment, envProduction:
+		// 인식되는 값.
+	default:
+		return Config{}, fmt.Errorf("APP_ENV가 올바르지 않습니다(허용: %s|%s, 빈 값=개발): %q",
+			envDevelopment, envProduction, appEnv)
+	}
+	// 운영 모드에서 DB가 없으면 조용히 인메모리로 떠 데이터가 증발하는 사고를 막는다(fail-fast).
+	if appEnv == envProduction && dsn == "" {
+		return Config{}, errors.New("APP_ENV=production인데 DATABASE_URL/DB_*가 미설정입니다 — 인메모리 폴백 금지")
+	}
+
 	return Config{
 		Port:            getEnv("APP_PORT", "8080"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
 		PublicBaseURL:   baseURL,
 		ShortCodeLength: codeLen,
+		AppEnv:          appEnv,
 		// 비어 있으면 main에서 인메모리 저장소로 폴백한다(로컬 개발 편의).
 		DatabaseURL: dsn,
 	}, nil
