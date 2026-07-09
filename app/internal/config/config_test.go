@@ -105,6 +105,84 @@ func TestResolveDatabaseURL_PasswordOnlyIsError(t *testing.T) {
 	}
 }
 
+// APP_ENV 가드: 운영 모드에서 DB 미설정을 fail-fast하고, 미인식 값도 거부하며,
+// 개발 기본(빈 값)은 인메모리 폴백을 유지하는지 검증한다.
+func TestLoad_AppEnvGuard(t *testing.T) {
+	// dbKeys는 각 케이스 시작 시 초기화할 DB 관련 env(프로세스 환경 오염 차단).
+	dbKeys := []string{"DATABASE_URL", "DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_PORT", "DB_SSLMODE", "APP_ENV"}
+
+	cases := []struct {
+		name    string
+		env     map[string]string
+		wantErr bool
+		check   func(t *testing.T, cfg Config) // 정상 케이스의 세부 단언(선택)
+	}{
+		{
+			name:    "production + DB 미설정 → 에러", // (a)
+			env:     map[string]string{"APP_ENV": "production"},
+			wantErr: true,
+		},
+		{
+			name: "production + 완전한 DB_* → 정상(운영 실경로)", // (b)
+			env: map[string]string{
+				"APP_ENV": "production",
+				"DB_HOST": "h", "DB_USER": "u", "DB_PASSWORD": "pw", "DB_NAME": "n",
+			},
+			check: func(t *testing.T, cfg Config) {
+				if cfg.AppEnv != "production" {
+					t.Errorf("AppEnv = %q, want production", cfg.AppEnv)
+				}
+				if cfg.DatabaseURL == "" {
+					t.Error("DB_*로 DatabaseURL이 조립되어야 한다")
+				}
+			},
+		},
+		{
+			name: "production + DATABASE_URL → 정상", // (c)
+			env:  map[string]string{"APP_ENV": "production", "DATABASE_URL": "postgres://u:p@h:5432/db?sslmode=disable"},
+		},
+		{
+			name: "빈 APP_ENV + DB 미설정 → 정상(인메모리)", // (d)
+			env:  map[string]string{"APP_ENV": ""},
+			check: func(t *testing.T, cfg Config) {
+				if cfg.DatabaseURL != "" {
+					t.Errorf("DB 미설정이면 DatabaseURL이 비어야 한다(인메모리): %q", cfg.DatabaseURL)
+				}
+			},
+		},
+		{
+			name:    "미인식 값(prod) → 에러", // (e)
+			env:     map[string]string{"APP_ENV": "prod"},
+			wantErr: true,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, k := range dbKeys {
+				t.Setenv(k, "")
+			}
+			for k, v := range c.env {
+				t.Setenv(k, v)
+			}
+
+			cfg, err := Load()
+			if c.wantErr {
+				if err == nil {
+					t.Fatal("에러를 기대했으나 nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("정상을 기대했으나 에러: %v", err)
+			}
+			if c.check != nil {
+				c.check(t, cfg)
+			}
+		})
+	}
+}
+
 // Load 전체 경로에서 DB_*가 cfg.DatabaseURL로 조립되는지 확인한다.
 func TestLoad_AssemblesDSNFromParts(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")

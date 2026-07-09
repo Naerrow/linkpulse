@@ -25,5 +25,7 @@ coverage.out
 # GameDay/장애 증거 원본(계정 ID·ARN·Slack ID 등 메타데이터 포함 가능) — 회고 문서에 발췌만 커밋
 docs/postmortems/evidence/
 docs/plans/README.md
+docs/plans/*/review-*
+docs/plans/*/code*
 CLAUDE.md
 AGENTS.md

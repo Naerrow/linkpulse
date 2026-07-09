@@ -7,10 +7,12 @@ import (
 )
 
 // withMiddleware는 공통 미들웨어로 핸들러를 감싼다.
-// requestLogger가 상태코드 래퍼를 만들고, 그 안에서 recoverer가 panic을 잡아
-// 같은 래퍼로 500을 기록하도록 requestLogger를 바깥에 둔다.
-func withMiddleware(next http.Handler) http.Handler {
-	return requestLogger(recoverer(next))
+// 체인: requestLogger(recoverer(rateLimit(next))).
+//   - requestLogger를 최외곽에 둬 429를 포함한 모든 응답의 상태코드를 기록한다.
+//   - recoverer가 rateLimit을 감싸 리미터 자체 버그의 panic도 500으로 복구한다.
+//   - rateLimit이 최내곽이라 한도 초과 시 실제 핸들러 실행 전에 거부한다.
+func withMiddleware(rl *rateLimit, next http.Handler) http.Handler {
+	return requestLogger(recoverer(rl.middleware(next)))
 }
 
 // requestLogger는 각 요청의 메서드·경로·상태코드·소요시간을 구조화 로깅한다.

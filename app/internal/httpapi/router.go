@@ -13,6 +13,8 @@ type RouterDeps struct {
 	BaseURL string
 	// Readiness는 레디니스 점검 함수다. nil이면 외부 의존성이 없다고 보고 항상 준비됨으로 응답한다.
 	Readiness func(ctx context.Context) error
+	// RateLimit은 레이트리밋 파라미터다. zero-value면 운영 기본값이 적용된다(RateLimitConfig 참고).
+	RateLimit RateLimitConfig
 }
 
 // NewRouter는 애플리케이션의 전체 HTTP 라우팅을 구성해 공통 미들웨어로 감싼 핸들러를 반환한다.
@@ -36,5 +38,6 @@ func NewRouter(d RouterDeps) http.Handler {
 	// 단축 코드 리다이렉트. 가장 덜 구체적인 패턴이라 위 예약 경로들이 우선한다.
 	mux.HandleFunc("GET /{code}", lh.redirect)
 
-	return withMiddleware(mux)
+	// 리미터 상태 맵은 여기서 1회 생성돼 모든 요청이 공유한다(요청당 재생성 금지).
+	return withMiddleware(newRateLimit(d.RateLimit), mux)
 }
