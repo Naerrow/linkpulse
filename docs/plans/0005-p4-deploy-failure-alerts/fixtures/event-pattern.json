@@ -1,0 +1,8 @@
+{
+  "source": ["aws.ecs"],
+  "detail-type": ["ECS Deployment State Change"],
+  "detail": {
+    "eventName": ["SERVICE_DEPLOYMENT_FAILED"]
+  },
+  "resources": ["arn:aws:ecs:ap-northeast-2:123456789012:service/linkpulse-prod-cluster/linkpulse-prod-app"]
+}
