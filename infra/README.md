@@ -151,6 +151,15 @@ GitHub CLI가 로그인되어 있으면 workflow 트리거까지 같이 할 수 
 
 **통지가 안 오면:** ① 채널에 `@Amazon Q` 앱이 초대됐는지 ② **실제 구독 존재** 확인 — `slack_alerts_enabled=true`는 team/channel 변수가 설정됐다는 Terraform 계산값일 뿐이므로, `aws sns list-subscriptions-by-topic --topic-arn "$(terraform output -raw sns_alarms_topic_arn)"`(또는 SNS 콘솔)로 구독이 실제로 걸렸는지 본다 ③ 그 구독에 **raw message delivery가 켜져 있지 않은지**(꺼야 한다)를 본다.
 
+### 배포 실패 알림 (P4 — 자세히는 `docs/adr/0003-deploy-failure-alerts.md`)
+
+ECS 롤링 배포가 실패해 서킷브레이커가 롤백하면 Slack으로 자동 통지한다. 경로: **EventBridge(`ECS Deployment State Change`/`SERVICE_DEPLOYMENT_FAILED`) → SNS(`linkpulse-prod-alarms`, 재사용) → Chatbot → Slack**. 규칙·타깃·실행 role은 `eventbridge.tf`.
+
+- **커버리지 갭:** 이 경로는 **ECS단 배포 실패만** 잡는다. GitHub Actions단 실패(빌드/테스트 실패, **러너 미획득/플랫폼 장애**)는 ECS까지 도달하지 않아 못 잡는다 — `job not acquired`는 githubstatus.com부터 본다(`docs/postmortems/2026-07-09-deploy-runner-acquisition.md`).
+- **필터 사전 검증(apply 전):** `docs/plans/0005-p4-deploy-failure-alerts/fixtures`의 `aws events test-event-pattern`으로 event_pattern이 실패 이벤트를 잡는지 확인한다(`{ "Result": true }` 기대).
+- **종단 검증(apply 후):** `slack_alerts_enabled=true` 확인 → 의도적 나쁜 이미지 배포로 서킷브레이커 롤백 유발 → **Slack 배포 실패 카드 수신**(서비스 ARN·이벤트명·`reason` 정상 렌더) → 서킷브레이커가 직전 정상 taskdef로 자동 롤백하므로 재배포 없이 복구(원복 확인만). 나쁜 이미지·주입 절차는 기존 GameDay 자료 재사용: `load/chaos/README.md`(chaos 이미지, `/healthz` 404), `docs/postmortems/2026-07-06-gameday-01.md`(known-good taskdef 기준선·진행 중 run 부재·healthz 폴링 preflight).
+- **`reason` escaping 잔여 리스크(수용):** `reason`에 개행이 들어가면 카드가 조용히 드롭될 수 있으나, ECS 통제 단일 줄 문자열이라 수용한다(근거·검증법은 ADR 0003).
+
 ### 알람 테스트 (실제 발화·통지 확인)
 
 ```bash

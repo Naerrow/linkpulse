@@ -1,0 +1,19 @@
+{
+  "version": "0",
+  "id": "9f7b4c1e-0000-0000-0000-0000000000ff",
+  "detail-type": "ECS Deployment State Change",
+  "source": "aws.ecs",
+  "account": "123456789012",
+  "time": "2026-07-09T12:34:56Z",
+  "region": "ap-northeast-2",
+  "resources": [
+    "arn:aws:ecs:ap-northeast-2:123456789012:service/linkpulse-prod-cluster/linkpulse-prod-app"
+  ],
+  "detail": {
+    "eventType": "ERROR",
+    "eventName": "SERVICE_DEPLOYMENT_FAILED",
+    "deploymentId": "ecs-svc/1234567890123456789",
+    "updatedAt": "2026-07-09T12:34:56.789Z",
+    "reason": "circuit breaker: \"bad\" image\nsecond line"
+  }
+}
