@@ -60,7 +60,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 
 ### §1 `linkpulse-prod-alb-no-healthy-hosts` — 정상 타깃 0 = 서비스 다운
 
-- **의미**: 타깃그룹에 healthy 타깃이 3분간 없거나, **지표 자체가 소실**(타깃 전원 deregister — `treat_missing=breaching` 설계). 원래 무트래픽 다운의 방어선으로 설계했으나, **P4(c) canary 도입 후에는 느린 최후 백스톱으로 강등**됐다(무트래픽 1차 방어선은 canary/§13). **이 알람이 울리면 진짜 다운이지만, 그 역(다운이면 이 알람이 곧 울린다)은 실측상 성립하지 않았다** — GameDay(2026-07-06) 전면 다운 2회에서 이 알람은 9분48초 만에(복구 후) 울리거나 아예 미발화했다. **즉 빠른 MTTD 신호로 신뢰하지 말 것** — 다운 감지는 `alb-elb-5xx`(§2)·canary(§13)가 먼저 한다. (이 지연/미발화의 원인 규명은 P4(c)에서 진행 — [ADR 0004](../adr/0004-notraffic-canary.md), 판정=백스톱 유지·비신뢰, 근본원인 확정은 step 8.)
+- **의미**: 타깃그룹에 healthy 타깃이 3분간 없거나, **지표 자체가 소실**(타깃 전원 deregister — `treat_missing=breaching` 설계). 원래 무트래픽 다운의 방어선으로 설계했으나, **P4(c) canary 도입 후에는 느린 최후 백스톱으로 강등**됐다(무트래픽 1차 방어선은 canary/§13). **이 알람이 울리면 진짜 다운이지만, 그 역(다운이면 이 알람이 곧 울린다)은 실측상 성립하지 않았다** — GameDay(2026-07-06) 전면 다운 2회 + 무트래픽 canary 드릴(2026-07-13) 1회 = **3회 모두** 이 알람은 9분48초 만에(복구 후) 울리거나 아예 미발화했다. **즉 빠른 MTTD 신호로 신뢰하지 말 것** — 다운 감지는 `alb-elb-5xx`(§2)·canary(§13)가 먼저 한다. (근본원인은 P4(c)에서 **실측 확정** — [ADR 0004](../adr/0004-notraffic-canary.md) §A-5: desired=0 시 `HealthyHostCount`가 missing이 되어 지표가 소멸하는 **구조적 결함**이라 주기·임계 튜닝 무효, 백스톱 유지·비신뢰.)
 - **먼저**: 공통 0-2(대개 503)·0-4. `desired`/`running` 숫자가 첫 갈림길.
 - **원인 → 복구**:
   1. **desired=0** (사람 실수, 드릴 뒤 복원 누락): 0-4에서 `desired: 0` → **R-2**. 복구 ~2–3분.
@@ -209,7 +209,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 
 ### INSUFFICIENT_DATA 일반 해석
 
-- `running-tasks-low`(Insights 활성 직후·태스크 0), RDS 계열(재부팅 공백)에서 정상적으로 나타날 수 있음(`treat_missing=missing` 설계). **§1·§10은 breaching이라 데이터 소실도 ALARM** — 이 둘의 INSUFFICIENT_DATA는 비정상이니 조사.
+- `running-tasks-low`(Insights 활성 직후·태스크 0), RDS 계열(재부팅 공백)에서 정상적으로 나타날 수 있음(`treat_missing=missing` 설계). **§1·§10은 breaching이라 데이터 소실도 (결국) ALARM** — 이 둘의 INSUFFICIENT_DATA는 비정상이니 조사. **단 §1(`no-healthy-hosts`)은 지표 소실 시 발화가 느리거나 안 나기도 한다(실측 9분48초/미발화, [ADR 0004](../adr/0004-notraffic-canary.md) §A-5) — MTTD 신호로 신뢰 말 것, 무트래픽 감지는 canary(§13)가 담당.**
 
 ### 수동 테스트·드릴로 울린 알람 구분
 
