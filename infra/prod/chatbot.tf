@@ -48,7 +48,10 @@ resource "aws_chatbot_slack_channel_configuration" "alarms" {
   slack_team_id      = trimspace(var.slack_team_id)
   slack_channel_id   = trimspace(var.slack_channel_id)
 
-  sns_topic_arns              = [aws_sns_topic.alarms.arn]
+  # ap-northeast-2 알람 토픽 + us-east-1 canary 토픽(크로스리전)을 한 Slack 채널로 팬아웃.
+  # 이 config는 이미 ap-northeast-2 토픽을 us-east-2 Chatbot에 크로스리전 바인딩 중이라(ADR 0002)
+  # us-east-1 토픽 추가도 검증된 패턴이다. canary_use1 토픽은 count 없이 상시 생성돼 참조 안전.
+  sns_topic_arns              = [aws_sns_topic.alarms.arn, aws_sns_topic.canary_use1.arn]
   guardrail_policy_arns       = ["arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess"]
   user_authorization_required = false
   logging_level               = "ERROR"

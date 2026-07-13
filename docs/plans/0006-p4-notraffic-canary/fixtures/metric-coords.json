@@ -1,0 +1,11 @@
+{
+  "_note": "HealthCheckStatus 지표 좌표 — us-east-1에만 발행(글로벌 서비스 규약). HealthCheckId는 apply 후 확정. list-metrics --region us-east-1 로 발행 실측(하드 게이트).",
+  "namespace": "AWS/Route53",
+  "metric_name": "HealthCheckStatus",
+  "publishing_region": "us-east-1",
+  "dimensions": [{ "Name": "HealthCheckId", "Value": "<apply 후 확정>" }],
+  "values": { "1": "healthy", "0": "unhealthy" },
+  "valid_statistics": ["Minimum", "Average", "Maximum"],
+  "_region_source": "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/monitoring-health-checks.html — 'Change the current region to US East (N. Virginia). Route 53 metrics are not available if you select any other region.'",
+  "_metric_source": "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/monitoring-cloudwatch.html"
+}
