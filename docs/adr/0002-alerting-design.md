@@ -20,7 +20,7 @@ P3에서 "감지·통지"를 도입한다. 로깅·자동 롤백(circuit breaker
 4. **임계값은 소스오브트루스에서 파생.** RunningTaskCount 임계값 = `var.service_desired_count`, FreeStorageSpace 임계값 = `var.db_allocated_storage`의 10%. 리터럴을 박지 않아 용량/desired를 바꿔도 알람이 따라온다.
 5. **treat_missing_data 방향(설계 의도):**
    - 트래픽 지표(5xx·p95·unhealthy): `notBreaching` — 무트래픽=정상.
-   - `HealthyHostCount<1`: `breaching` — 데이터가 없으면(타깃 전부 deregister) 다운으로 간주. **무트래픽에서 5xx/unhealthy가 침묵하는 사각지대를 이 알람이 메운다.**
+   - `HealthyHostCount<1`: `breaching` — 데이터가 없으면(타깃 전부 deregister) 다운으로 간주. **무트래픽에서 5xx/unhealthy가 침묵하는 사각지대를 이 알람이 메운다.** _(2026-07-13 정정: 이 사각지대 가정은 GameDay/P4(c) 실측으로 반증 — 지표가 missing이 되어 발화가 느리거나(9분48초) 안 난다. 무트래픽 방어선은 [ADR 0004](0004-notraffic-canary.md) canary가 실제로 메우고, 이 알람은 느린 백스톱으로 강등.)_
    - `RunningTaskCount`: `missing` — Container Insights 활성 직후 초기 공백을 오탐으로 만들지 않기 위함(INSUFFICIENT_DATA는 정상).
    - RDS `FreeStorageSpace`: `breaching`(소진은 고위험). CPU/Connections/Memory: `missing`(재부팅 공백 오탐 회피).
 6. **p95 저트래픽 보정.** `TargetResponseTime` p95는 샘플이 적으면 튄다 → `evaluate_low_sample_count_percentiles = "ignore"`.
