@@ -1,0 +1,14 @@
+{
+  "_note": "synthetic-canary.tf aws_route53_health_check.canary 프로빙 대상 스냅샷 — apply 후 실제 헬스체크 설정과 대조. 헬스체크 리소스는 글로벌(리전 미지정).",
+  "type": "HTTPS",
+  "fully_qualified_domain_name": "lpulse.live",
+  "port": 443,
+  "resource_path": "/healthz",
+  "enable_sni": true,
+  "request_interval": 30,
+  "failure_threshold": 3,
+  "search_string": null,
+  "measure_latency": false,
+  "_healthy_response": "string-match 없음 → Route53는 2xx/3xx 응답을 healthy로 판정(/healthz=200 정상). ADR 0004 §1차 출처.",
+  "_source": "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover-determining-health-of-endpoints.html"
+}

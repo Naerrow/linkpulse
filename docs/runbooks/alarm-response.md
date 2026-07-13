@@ -2,7 +2,7 @@
 
 Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다. 1인 운영 전제 — 에스컬레이션 대상은 없고, 대신 모든 판단·시각을 기록해 회고로 넘긴다.
 
-- 통지 경로: CloudWatch Alarm → SNS(`linkpulse-prod-alarms`) → Chatbot → Slack ([ADR 0002](../adr/0002-alerting-design.md))
+- 통지 경로: CloudWatch Alarm → SNS(`linkpulse-prod-alarms`) → Chatbot → Slack ([ADR 0002](../adr/0002-alerting-design.md)). **단 무트래픽 canary(§13)만 us-east-1 전용 토픽(`linkpulse-prod-canary-alarms`)을 거친다**([ADR 0004](../adr/0004-notraffic-canary.md))
 - 알람 정의(임계값의 소스오브트루스): `infra/prod/monitoring.tf` — **임계값은 전부 초기값**, 오탐이 반복되면 §튜닝 노트를 보고 Terraform으로 조정(사람 apply)
 - 표기: 명령은 read-only가 기본. 상태를 바꾸는 명령은 **[사람]** 표기 — 에이전트 자율 실행 금지(가드레일 #1)
 - 로그 조회 쿼리 모음·Slack 배선 점검은 [`infra/README.md`](../../infra/README.md) 참고
@@ -17,11 +17,14 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
    curl -sk -o /dev/null -w '%{http_code}\n' --max-time 5 https://lpulse.live/healthz
    ```
    - `200` → 영향 없음/미미. 침착하게 해당 알람 절로.
-   - `503`/timeout → **다운. 먼저 `alb-elb-5xx`(§2)와 0-4의 `describe-services`(desired/running)를 본다.** GameDay 실측(2026-07-06): 전면 다운 시 **실제로 가장 먼저·일관되게 울린 건 `alb-elb-5xx`**(MTTD 3~5분)였고, `no-healthy-hosts`(§1)·`running-tasks-low`(§8)는 **늦거나(복구 후) 아예 침묵**했다. 단 이 우선순위는 **트래픽(또는 healthz 폴링 같은 synthetic 요청)이 있는 다운** 한정 — 진짜 무트래픽 다운이면 5xx 자체가 안 생기므로 그때는 §1이 유일한 방어선이다(그 신뢰성은 미검증, 회고 A-5).
-3. **비정상 알람 전수 확인** (동반 알람 조합이 원인을 말해준다):
+   - `503`/timeout → **다운. 먼저 `alb-elb-5xx`(§2)와 0-4의 `describe-services`(desired/running)를 본다.** GameDay 실측(2026-07-06): 전면 다운 시 **실제로 가장 먼저·일관되게 울린 건 `alb-elb-5xx`**(MTTD 3~5분)였고, `no-healthy-hosts`(§1)·`running-tasks-low`(§8)는 **늦거나(복구 후) 아예 침묵**했다. **무트래픽 다운(새벽 등 실사용 0)이어도 P4(c) canary가 `lpulse.live/healthz`를 상시 외부 프로빙(§13)**하므로, 그 synthetic 요청으로 `alb-elb-5xx`가 발화하고 canary 자신의 `canary_down`(§13, us-east-1)이 결정론적 백스톱이 된다. `no-healthy-hosts`(§1)는 **느린 최후 백스톱**으로만 남고 MTTD 신호로 신뢰하지 않는다(회고 A-5, [ADR 0004](../adr/0004-notraffic-canary.md)).
+3. **비정상 알람 전수 확인** (동반 알람 조합이 원인을 말해준다). **두 리전 모두 본다** — 12개 알람은 ap-northeast-2, 무트래픽 canary(§13)는 **us-east-1**에 있다(빠뜨리면 canary 다운을 놓친다):
    ```bash
    aws cloudwatch describe-alarms --alarm-name-prefix linkpulse-prod \
      --query 'MetricAlarms[?StateValue!=`OK`].[AlarmName,StateValue,StateReason]' --output table --region ap-northeast-2
+   # canary(§13)는 us-east-1
+   aws cloudwatch describe-alarms --alarm-name-prefix linkpulse-prod \
+     --query 'MetricAlarms[?StateValue!=`OK`].[AlarmName,StateValue,StateReason]' --output table --region us-east-1
    ```
 4. **ECS가 스스로 말하는 것부터 듣는다** (desired/running·배포 상태·최근 이벤트):
    ```bash
@@ -48,7 +51,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 
 ### 심각도
 
-- **SEV-1 즉시 대응(사용자 영향·고위험)**: §1 no-healthy-hosts · §2 elb-5xx · §3 target-5xx · §8 running-tasks-low · §10 rds-free-storage-low
+- **SEV-1 즉시 대응(사용자 영향·고위험)**: §1 no-healthy-hosts · §2 elb-5xx · §3 target-5xx · §8 running-tasks-low · §10 rds-free-storage-low · **§13 canary-down(us-east-1, 무트래픽 방어선 — 단 첫 발화는 오탐 진위 확인 후)**
 - **SEV-2 당일 대응(성능·용량 경고)**: 나머지. 단 **여러 SEV-2가 동시에 오면 SEV-1로 취급**(복합 장애 신호).
 
 ---
@@ -57,7 +60,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 
 ### §1 `linkpulse-prod-alb-no-healthy-hosts` — 정상 타깃 0 = 서비스 다운
 
-- **의미**: 타깃그룹에 healthy 타깃이 3분간 없거나, **지표 자체가 소실**(타깃 전원 deregister — `treat_missing=breaching` 설계). 무트래픽에서도 울리도록 설계한 최종 방어선. **이 알람이 울리면 진짜 다운이지만, 그 역(다운이면 이 알람이 곧 울린다)은 실측상 성립하지 않았다** — GameDay(2026-07-06) 전면 다운 2회에서 이 알람은 9분48초 만에(복구 후) 울리거나 아예 미발화했다. **즉 빠른 MTTD 신호로 신뢰하지 말 것** — 다운 감지는 `alb-elb-5xx`(§2)가 먼저 한다. (이 지연/미발화의 원인 규명·튜닝은 회고 A-5 백로그.)
+- **의미**: 타깃그룹에 healthy 타깃이 3분간 없거나, **지표 자체가 소실**(타깃 전원 deregister — `treat_missing=breaching` 설계). 원래 무트래픽 다운의 방어선으로 설계했으나, **P4(c) canary 도입 후에는 느린 최후 백스톱으로 강등**됐다(무트래픽 1차 방어선은 canary/§13). **이 알람이 울리면 진짜 다운이지만, 그 역(다운이면 이 알람이 곧 울린다)은 실측상 성립하지 않았다** — GameDay(2026-07-06) 전면 다운 2회에서 이 알람은 9분48초 만에(복구 후) 울리거나 아예 미발화했다. **즉 빠른 MTTD 신호로 신뢰하지 말 것** — 다운 감지는 `alb-elb-5xx`(§2)·canary(§13)가 먼저 한다. (이 지연/미발화의 원인 규명은 P4(c)에서 진행 — [ADR 0004](../adr/0004-notraffic-canary.md), 판정=백스톱 유지·비신뢰, 근본원인 확정은 step 8.)
 - **먼저**: 공통 0-2(대개 503)·0-4. `desired`/`running` 숫자가 첫 갈림길.
 - **원인 → 복구**:
   1. **desired=0** (사람 실수, 드릴 뒤 복원 누락): 0-4에서 `desired: 0` → **R-2**. 복구 ~2–3분.
@@ -70,7 +73,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 ### §2 `linkpulse-prod-alb-elb-5xx` — ALB 자신이 낸 5xx ≥5/5분
 
 - **의미**: 요청이 타깃까지 못 갔다 — 503(정상 타깃 없음)·502(타깃 연결 거부/비정상 응답)·504(타임아웃). 사용자에게 오류가 **보이고 있다**. dimension이 LB 전용이라 타깃 5xx(§3)와 구분된다.
-- **전면 다운의 1순위 신호(실측)**: GameDay 2회 모두 이 알람이 전면 다운을 **가장 먼저**(MTTD 3분37초·4분54초) 감지했다 — 503이 뜨면 §1보다 이 절을 먼저 본다(단 트래픽/synthetic 요청이 있을 때. 무트래픽이면 5xx가 없어 이 알람도 안 뜬다 → §1).
+- **전면 다운의 1순위 신호(실측)**: GameDay 2회 모두 이 알람이 전면 다운을 **가장 먼저**(MTTD 3분37초·4분54초) 감지했다 — 503이 뜨면 §1보다 이 절을 먼저 본다. **P4(c) canary 도입 후에는 실사용 트래픽이 0이어도 canary의 `/healthz` synthetic 프로빙이 ALB 503을 만들어 이 알람이 발화**하므로 무트래픽에서도 1순위다(canary 자체 liveness는 §13 `canary_down`). canary·외부 요청까지 전부 없는 극단에서만 이 알람이 침묵하고, 그때는 §1(느린 백스톱)이 최후 보루다.
 - **⚠ OK 통지는 신뢰하지 말 것(회복 판정용 아님)**: 이 지표(`HTTPCode_ELB_5XX_Count`)는 **sparse 카운트**(5xx=0이면 데이터포인트 부재)라, 복구 후 missing→`notBreaching` 확정에 시간이 크게 걸린다 — 실측 OK 지연이 **복구 후 2분49초~17분26초**로 편차가 컸다. **회복 여부는 OK 알림을 기다리지 말고 `curl .../healthz`=200 + 0-4의 `running=desired`로 직접 확인**(MTTR 기준점). (회고 A-9)
 - **먼저**: §1 동반 여부(0-3) — 동반이면 §1 절차가 곧 복구. 단독이면:
   - **502 위주**: 태스크가 죽는 순간의 잔여 연결 가능성 → 0-4 events·R-6(방금 태스크 교체가 있었나), R-5.
@@ -178,6 +181,30 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 
 ---
 
+## SEV-1 (크로스리전 — us-east-1)
+
+### §13 `linkpulse-prod-canary-down` — Route53 헬스체크 DOWN = 무트래픽 방어선 (us-east-1 알람)
+
+무트래픽 다운의 **1차 방어선**이다(회고 A-5·A-10, [ADR 0004](../adr/0004-notraffic-canary.md)). Route53 헬스체크가 `lpulse.live/healthz`를 외부에서 상시 프로빙해, 실사용 트래픽이 0이어도 `HealthCheckStatus`(1=정상/0=다운)로 down을 잡는다. **이 알람·지표는 us-east-1에만 있다** — 조회는 전부 `--region us-east-1`.
+
+- **⚠ 최초 발행 레이스**: 헬스체크 생성 직후 지표 최초 발행 전 공백이 `breaching`으로 잡혀 **서비스는 정상인데 down 카드가 1회** 뜰 수 있다. **첫 canary ALARM은 아래 진위 확인 전까지 실장애로 단정하지 않는다.**
+- **먼저(진위 확인)**: §0-2 `curl .../healthz`가 `200`이면 오탐 의심 → 헬스체크 상태·지표 발행 확인:
+  ```bash
+  aws cloudwatch describe-alarms --alarm-names linkpulse-prod-canary-down \
+    --query 'MetricAlarms[0].[StateValue,StateReason]' --output table --region us-east-1
+  # 헬스체크ID는 알람 dimension에서 바로 뽑는다(terraform 불요). state 접근 가능하면 `terraform output -raw canary_health_check_id`도 가능.
+  HCID=$(aws cloudwatch describe-alarms --alarm-names linkpulse-prod-canary-down --region us-east-1 \
+    --query "MetricAlarms[0].Dimensions[?Name=='HealthCheckId'].Value | [0]" --output text)
+  aws cloudwatch get-metric-statistics --namespace AWS/Route53 --metric-name HealthCheckStatus \
+    --dimensions Name=HealthCheckId,Value="$HCID" --statistics Minimum --period 60 \
+    --start-time <ISO8601> --end-time <ISO8601> --region us-east-1
+  ```
+  `503`/timeout이면 **진짜 다운** → `alb-elb-5xx`(§2)도 곧/이미 발화한다. §2/§1 경로로 복구(**R-1/R-1e**, desired=0이면 **R-2**).
+- **역할 분리(MTTD)**: `alb-elb-5xx`(canary 트래픽 기반 ~3–5분)=빠른 1차, `canary_down`(≈flip 90s + 알람 3분)=결정론적 백스톱. 둘 다 `no-healthy-hosts`(§1, 9분48초/무발화)보다 빠르다 — S2 확인 순서는 여전히 **§2 우선**.
+- **통지가 안 오면**: 이 알람은 **us-east-1 전용 토픽**(`sns_canary_topic_arn`)→Chatbot 경로다. `aws sns list-subscriptions-by-topic --topic-arn "$(terraform output -raw sns_canary_topic_arn)" --region us-east-1`로 구독 실존 확인(`infra/README.md` §모니터링).
+
+---
+
 ## 부록
 
 ### INSUFFICIENT_DATA 일반 해석
@@ -193,6 +220,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 ```bash
 aws cloudwatch describe-alarm-history --alarm-name <알람명> --history-item-type StateUpdate \
   --start-date <ISO8601> --end-date <ISO8601> --output json --region ap-northeast-2
+# canary(§13 canary-down)는 us-east-1: 위 명령에서 --region us-east-1
 ```
 
 ### 통지가 안 올 때 (알람은 ALARM인데 Slack 침묵)

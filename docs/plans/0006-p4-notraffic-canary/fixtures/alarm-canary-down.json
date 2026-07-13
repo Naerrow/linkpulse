@@ -1,0 +1,17 @@
+{
+  "_note": "synthetic-canary.tf aws_cloudwatch_metric_alarm.canary_down 스키마 — 알람은 us-east-1(provider aws.use1). HealthCheckId·account는 apply 후 확정되는 자리표시자.",
+  "region": "us-east-1",
+  "alarm_name": "linkpulse-prod-canary-down",
+  "namespace": "AWS/Route53",
+  "metric_name": "HealthCheckStatus",
+  "dimensions": { "HealthCheckId": "<apply 후 확정>" },
+  "statistic": "Minimum",
+  "period": 60,
+  "evaluation_periods": 3,
+  "threshold": 1,
+  "comparison_operator": "LessThanThreshold",
+  "treat_missing_data": "breaching",
+  "alarm_actions": ["arn:aws:sns:us-east-1:123456789012:linkpulse-prod-canary-alarms"],
+  "ok_actions": ["arn:aws:sns:us-east-1:123456789012:linkpulse-prod-canary-alarms"],
+  "_check": "alarm_actions·ok_actions ARN 리전이 반드시 us-east-1 이어야 한다(ap-northeast-2를 가리키면 오배선 → 카드 미수신)."
+}
