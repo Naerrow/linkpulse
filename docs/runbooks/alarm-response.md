@@ -49,6 +49,8 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 
 ②: `aws ecs describe-task-definition --task-definition <arn> --query 'taskDefinition.containerDefinitions[0].image' --output text --region ap-northeast-2` — 태그는 이미지 URI의 `:` 뒷부분. known-good taskdef ARN·태그는 사고 후 찾는 게 아니라 **배포 전 기준선(B-1)으로 기록해두는 것**이 원칙이다.
 
+**[참고 — 복구 도구 아님]** 백업에서 **격리된 별도 인스턴스**로 복원해 데이터가 조회되는지 확인하는 **검증 절차**는 [`rds-restore.md`](rds-restore.md)에 있다. **사고 복구·cutover 절차가 아니다** — 손상된 운영 데이터의 역복사, 쓰기 동결, 복원본으로의 전환, 서비스 헬스 확인, 롤백은 그 문서 범위 밖이며 **아직 구현되지 않았다.** 실제 데이터 손실 사고에서는 그 절차만으로 서비스가 복구되지 않는다는 것을 전제로 판단한다.
+
 ### 심각도
 
 - **SEV-1 즉시 대응(사용자 영향·고위험)**: §1 no-healthy-hosts · §2 elb-5xx · §3 target-5xx · §8 running-tasks-low · §10 rds-free-storage-low · **§13 canary-down(us-east-1, 무트래픽 방어선 — 단 첫 발화는 오탐 진위 확인 후)**
