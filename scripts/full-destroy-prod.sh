@@ -75,8 +75,22 @@ DESTROY_VARS=(
   "-var=ecr_force_delete=true"
 )
 
+STATE_LIST=""
+
+load_state_list() {
+  local output
+
+  if ! output="$(terraform state list 2>&1)"; then
+    echo "Failed to read Terraform state; refusing to skip deletion-prep." >&2
+    echo "$output" >&2
+    exit 1
+  fi
+
+  STATE_LIST="$output"
+}
+
 state_has() {
-  terraform state list 2>/dev/null | grep -qx "$1"
+  grep -Fxq -- "$1" <<<"$STATE_LIST"
 }
 
 confirm() {
@@ -105,6 +119,8 @@ if [[ "$WORKSPACE" != "default" ]]; then
   echo "Refusing to run outside the default Terraform workspace. Current: $WORKSPACE" >&2
   exit 1
 fi
+
+load_state_list
 
 PREP_PLAN="$(mktemp -t linkpulse-prod-destroy-prep.XXXXXX.tfplan)"
 DESTROY_PLAN="$(mktemp -t linkpulse-prod-destroy.XXXXXX.tfplan)"

@@ -17,6 +17,8 @@ infra/prod/backend.hcl
 # .terraform.lock.hcl 은 의도적으로 커밋한다(프로바이더 버전 고정).
 # *.tfvars.example·backend.hcl.example 는 위 패턴에 안 걸려 커밋된다.
 .claude/
+# 이 clone에서만 사용하는 Codex 프로젝트 스킬
+.agents/
 # Go
 /app/bin/
 *.test
