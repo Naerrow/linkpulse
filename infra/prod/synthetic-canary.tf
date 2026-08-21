@@ -1,8 +1,14 @@
-# P4(c) 무트래픽 방어선 canary — Route53 헬스체크로 lpulse.live/healthz를 외부에서 상시 프로빙한다.
+# P4(c) 무트래픽 방어선 canary — Route53 헬스체크로 lpulse.live/readyz를 외부에서 상시 프로빙한다.
 # 두 가지를 동시에 해결한다:
 #   (a) 실사용 트래픽 0인 시간대에도 ALB로 실제 요청이 흘러(무트래픽 다운이면 ALB가 503 → 기존
 #       alb-elb-5xx가 무트래픽에서도 발화), (b) 헬스체크 자신의 HealthCheckStatus 지표(1=정상/0=다운)로
-#       트래픽·5xx 카운트와 무관한 결정론적 liveness 신호를 준다. 배경·트레이드오프는 docs/adr/0004.
+#       트래픽·5xx 카운트와 무관한 결정론적 readiness 신호를 준다. 배경·트레이드오프는 docs/adr/0004.
+#
+# P4(d)-2에서 프로빙 경로를 /healthz(liveness)에서 /readyz(DB 핑 포함)로 바꿨다. 2026-08-16 RDS 비밀번호
+# 로테이션 장애 때 앱이 DB 신규 연결에 전면 실패했는데도 /healthz는 DB를 보지 않아 66시간 내내 200을
+# 반환했고, 이 canary와 ALB 타깃그룹이 둘 다 /healthz를 보고 있어 어느 쪽도 발화하지 못했다.
+# liveness 백스톱은 잃지 않는다 — 프로세스가 죽으면 /readyz도 응답하지 못하므로 /readyz는 /healthz의
+# 상위집합이다.
 #
 # 크로스리전 함정: Route53 헬스체크의 CloudWatch 지표는 us-east-1에만 발행된다(글로벌 서비스 규약).
 # 그래서 알람은 provider=aws.use1(us-east-1)로 만들고, CloudWatch 알람 액션은 자기 리전의 SNS로만
@@ -44,16 +50,18 @@ resource "aws_sns_topic_policy" "canary_use1" {
 }
 
 # ---- Route53 헬스체크 (상시 synthetic canary) ----
-# HTTPS로 lpulse.live/healthz를 30초 주기 프로빙. string-match/measure_latency 미사용(비용 — 각 +$1/월):
-# string match 없이 Route53는 2xx/3xx 응답을 healthy로 판정하고(/healthz=200이라 정상), 3회 연속 실패 시
-# unhealthy로 전환한다. enable_sni=true는 ALB가 SNI로 인증서를 고르므로 필수. 리소스는 글로벌이라
+# HTTPS로 lpulse.live/readyz를 30초 주기 프로빙. string-match/measure_latency 미사용(비용 — 각 +$1/월):
+# string match 없이 Route53는 2xx/3xx 응답을 healthy로 판정하고(/readyz는 정상 시 200, DB 연결 실패 시
+# 503), 3회 연속 실패 시 unhealthy로 전환한다. Route53은 연결 후 2초 안에 2xx/3xx를 받아야 healthy로
+# 보므로, 앱의 레디니스 DB 핑 상한을 1초로 낮춰 마진을 확보한 뒤에 이 경로를 적용해야 한다
+# (app/internal/httpapi/health.go readinessTimeout — 순서가 뒤집히면 마진 0 상태로 프로빙된다). enable_sni=true는 ALB가 SNI로 인증서를 고르므로 필수. 리소스는 글로벌이라
 # 기본 provider로 만든다("Route 53 is a global service, so you don't specify the region" — ADR 0004).
 # ALB SG는 443을 0.0.0.0/0에 개방(security_groups.tf)해 글로벌 헬스체커가 도달 가능 — SG 변경 불요.
 resource "aws_route53_health_check" "canary" {
   type              = "HTTPS"
   fqdn              = var.domain_name
   port              = 443
-  resource_path     = "/healthz"
+  resource_path     = "/readyz"
   enable_sni        = true
   request_interval  = 30
   failure_threshold = 3
@@ -71,7 +79,7 @@ resource "aws_route53_health_check" "canary" {
 resource "aws_cloudwatch_metric_alarm" "canary_down" {
   provider          = aws.use1
   alarm_name        = "${local.name_prefix}-canary-down"
-  alarm_description = "Route53 health check for ${var.domain_name}/healthz is DOWN for 3min (no-traffic liveness backstop)"
+  alarm_description = "Route53 health check for ${var.domain_name}/readyz is DOWN for 3min (app down or DB unreachable; no-traffic readiness backstop)"
   namespace         = "AWS/Route53"
   metric_name       = "HealthCheckStatus"
   dimensions        = { HealthCheckId = aws_route53_health_check.canary.id }
