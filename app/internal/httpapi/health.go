@@ -8,7 +8,10 @@ import (
 )
 
 // readinessTimeout은 레디니스 점검(예: DB 핑)에 허용하는 최대 시간이다.
-const readinessTimeout = 2 * time.Second
+// Route53 헬스체크가 이 엔드포인트를 프로빙하므로 2초가 아니라 1초로 잡는다:
+// Route53은 연결 후 2초 안에 2xx/3xx를 받아야 healthy로 판정하는데(ADR 0004 인용 AWS 문서),
+// 핑 상한이 2초면 마진이 0이라 정상 DB에서도 오탐이 난다.
+const readinessTimeout = 1 * time.Second
 
 // statusResponse는 헬스/레디 체크의 응답 본문이다.
 type statusResponse struct {
