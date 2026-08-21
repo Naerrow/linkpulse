@@ -45,3 +45,11 @@ type errorDetail struct {
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, errorResponse{Error: errorDetail{Code: code, Message: message}})
 }
+
+// writeInternalError는 500 응답을 보내면서 원인 에러를 반드시 로그에 남긴다.
+// 500은 클라이언트에 원인을 노출하지 않으므로(정보 노출 방지), 로그에 남기지 않으면
+// 운영 중 발생한 500의 근본 원인(예: DB 장애)을 사후에 추적할 방법이 사라진다.
+func writeInternalError(w http.ResponseWriter, r *http.Request, err error) {
+	slog.Error("요청 처리 실패", "method", r.Method, "path", r.URL.Path, "error", err)
+	writeError(w, http.StatusInternalServerError, "internal_error", "내부 서버 오류")
+}

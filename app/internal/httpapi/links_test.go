@@ -1,11 +1,17 @@
 package httpapi
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Naerrow/linkpulse/app/internal/links"
 )
 
 // createLink은 POST /api/links를 호출해 생성된 링크 응답을 돌려주는 테스트 헬퍼다.
@@ -116,5 +122,46 @@ func TestStatsCountsClicks(t *testing.T) {
 	}
 	if body.Clicks != 2 {
 		t.Errorf("clicks = %d, want 2", body.Clicks)
+	}
+}
+
+// failingRepo는 저장소가 도메인 에러가 아닌 실패(예: DB 연결 끊김)를 내는 상황을 재현하는 스텁이다.
+type failingRepo struct{ err error }
+
+func (r failingRepo) Create(context.Context, string, string) (links.Link, error) {
+	return links.Link{}, r.err
+}
+
+func (r failingRepo) Get(context.Context, string) (links.Link, error) {
+	return links.Link{}, r.err
+}
+
+func (r failingRepo) IncrementClicks(context.Context, string) error { return r.err }
+
+// TestRedirectRepositoryFailureLogsCause는 저장소 장애(ErrNotFound가 아닌 오류)일 때
+// 500을 돌려주면서 원인 에러를 로그에 남기는지 확인한다.
+// 원인이 로그에 없으면 운영 중 쌓이는 500이 "없는 링크"인지 "DB 장애"인지 구분할 수 없다.
+func TestRedirectRepositoryFailureLogsCause(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	const cause = "DB 연결 끊김"
+	router := NewRouter(RouterDeps{
+		Links:     links.NewService(failingRepo{err: errors.New(cause)}, 7),
+		BaseURL:   testBaseURL,
+		RateLimit: RateLimitConfig{Disabled: true},
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/abcdefg", nil)
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if !strings.Contains(buf.String(), cause) {
+		t.Errorf("원인 에러가 로그에 없음: %s", buf.String())
 	}
 }
