@@ -49,7 +49,7 @@ func (h *linkHandler) create(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_url", "http 또는 https URL을 입력해 주세요")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "내부 서버 오류")
+		writeInternalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, h.toResponse(link))
@@ -63,7 +63,7 @@ func (h *linkHandler) redirect(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "존재하지 않는 단축 링크입니다")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "내부 서버 오류")
+		writeInternalError(w, r, err)
 		return
 	}
 	// 302(임시)를 쓴다: 301은 브라우저가 영구 캐싱해 이후 요청이 서버에 도달하지 않고,
@@ -79,7 +79,7 @@ func (h *linkHandler) stats(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "존재하지 않는 단축 링크입니다")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "internal_error", "내부 서버 오류")
+		writeInternalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, h.toResponse(link))
