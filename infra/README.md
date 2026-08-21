@@ -162,10 +162,13 @@ ECS 롤링 배포가 실패해 서킷브레이커가 롤백하면 Slack으로 �
 
 ### 무트래픽 방어선 canary (P4 — 자세히는 `docs/adr/0004-notraffic-canary.md`)
 
-실사용 트래픽이 0인 시간대(새벽 등)의 다운을 잡는 **무트래픽 방어선**이다(회고 A-5·A-10). Route53 헬스체크가 `lpulse.live/healthz`를 외부에서 상시(30초) 프로빙해, (a) 무트래픽 다운이어도 ALB가 503을 뱉어 `alb-elb-5xx`가 발화하게 하고, (b) `HealthCheckStatus`(1=정상/0=다운) 지표로 트래픽과 무관한 직접 liveness 신호를 준다. 리소스는 `synthetic-canary.tf`, us-east-1 provider 별칭은 `providers.tf`.
+실사용 트래픽이 0인 시간대(새벽 등)의 다운을 잡는 **무트래픽 방어선**이다(회고 A-5·A-10). Route53 헬스체크가 `lpulse.live/readyz`를 외부에서 상시(30초) 프로빙해, (a) 무트래픽 다운이어도 ALB가 503을 뱉어 `alb-elb-5xx`가 발화하게 하고, (b) `HealthCheckStatus`(1=정상/0=다운) 지표로 트래픽과 무관한 직접 신호를 준다. 리소스는 `synthetic-canary.tf`, us-east-1 provider 별칭은 `providers.tf`.
+
+- **무엇을 프로빙하나 (P4(d)-2에서 `/healthz` → `/readyz`로 변경):** 이 프로젝트의 두 엔드포인트는 역할이 다르다. `/healthz`는 **liveness** — 프로세스가 살아 요청을 처리하는지만 보고 **DB를 조회하지 않는다.** `/readyz`는 **readiness** — DB 핑까지 하고 실패하면 503이다. 2026-08-16 RDS 비밀번호 로테이션 장애 때 canary와 ALB 타깃그룹이 **둘 다 `/healthz`** 를 보고 있어, 앱이 DB 신규 연결에 전면 실패하는 66시간 내내 양쪽 모두 200을 받고 침묵했다. canary를 `/readyz`로 옮겨 이 공백을 닫았다. **liveness 백스톱은 잃지 않는다** — 프로세스가 죽으면 `/readyz`도 응답하지 못하므로 `/readyz`는 `/healthz`의 상위집합이다. **이 변경은 canary에만 적용했고 ALB 타깃그룹 헬스체크는 `/healthz` 그대로다**(`alb.tf`) — 타깃그룹까지 바꾸면 DB 장애 시 두 타깃이 모두 unhealthy가 돼 ECS 태스크 교체가 도는 별개의 트레이드오프가 생기므로 이 plan의 범위에서 제외했다. 그 결과 **DB 장애에서는 타깃이 healthy를 유지해 `alb-elb-5xx`가 울리지 않고 `alb-target-5xx`가 1순위**가 된다(runbook §13).
+- **응답 시간 제약:** Route53은 연결 후 **2초 안에** 2xx/3xx를 받아야 healthy로 본다. `/readyz`의 DB 핑 상한을 **1초**로 낮춰(`app/internal/httpapi/health.go` `readinessTimeout`) 마진을 뒀다. 앱 배포가 canary 경로 변경보다 **먼저** 나가야 한다 — 순서가 뒤집히면 마진 0 상태로 프로빙돼 오탐이 난다.
 
 - **크로스리전:** Route53 헬스체크 지표는 **us-east-1에만 발행**되므로 `canary_down` 알람·전용 SNS 토픽도 us-east-1에 둔다. 이 토픽을 기존 Chatbot config에 크로스리전으로 **추가** 바인딩해 같은 Slack 채널로 통지한다(ADR 0002 패턴). 그래서 canary 관련 CLI 조회는 전부 `--region us-east-1`.
-- **경로:** **Route53 health check(`HealthCheckStatus<1` 3분) → CloudWatch 알람(us-east-1) → SNS(`linkpulse-prod-canary-alarms`, us-east-1) → Chatbot → Slack**. 대응 절차는 [`runbook §13`](../docs/runbooks/alarm-response.md).
+- **경로:** **Route53 health check(`HealthCheckStatus<1` 3분) → CloudWatch 알람(us-east-1) → SNS(`linkpulse-prod-canary-alarms`, us-east-1) → Chatbot → Slack**. 대응 절차는 [`runbook §13`](../docs/runbooks/alarm-response.md), 예정된 비밀번호 로테이션 대응은 [`secret-rotation-bridge.md`](../docs/runbooks/secret-rotation-bridge.md).
 - **최초 apply 오탐 레이스:** 지표 최초 발행 전 공백이 `breaching`으로 잡혀 정상인데 down 카드가 1회 올 수 있다. **첫 canary ALARM은 `list-metrics`/헬스체크 상태로 진위 확인 전까지 장애로 단정하지 않는다**(2단계 apply로 회피 가능 — ADR 0004).
 - **비용:** 헬스체크 HTTPS ≈ $1.50/월 + 알람 ~$0.10/월 ≈ **$1.6/월**(string-match·10초 주기 미사용으로 최소화).
 - **종단 검증(apply 후):** us-east-1 지표 발행 실측(`list-metrics --region us-east-1 --namespace AWS/Route53`) → 비파괴 preflight(`set-alarm-state --region us-east-1`로 Slack canary 카드 수신 확인) → 수동 curl 없이(무트래픽) chaos 이미지로 desired=0 다운 → **`canary_down` 수분 내 Slack 다운 카드** + `alb-elb-5xx` MTTD 기록 → 복구 시 OK 카드. 절차·chaos 자산은 `load/chaos/README.md`·`docs/postmortems/2026-07-06-gameday-01.md` 재사용.

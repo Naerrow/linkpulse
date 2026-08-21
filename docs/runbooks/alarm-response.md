@@ -6,18 +6,23 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 - 알람 정의(임계값의 소스오브트루스): `infra/prod/monitoring.tf` — **임계값은 전부 초기값**, 오탐이 반복되면 §튜닝 노트를 보고 Terraform으로 조정(사람 apply)
 - 표기: 명령은 read-only가 기본. 상태를 바꾸는 명령은 **[사람]** 표기 — 에이전트 자율 실행 금지(가드레일 #1)
 - 로그 조회 쿼리 모음·Slack 배선 점검은 [`infra/README.md`](../../infra/README.md) 참고
+- **예정된 RDS 비밀번호 로테이션(7일 주기, 다음 2026-08-23)** 은 알람을 기다리지 말고 [`secret-rotation-bridge.md`](secret-rotation-bridge.md)를 **선제적으로** 수행한다 — 이 절차를 놓쳐 2026-08-16에 66시간 다운이 났다
 
 ---
 
 ## 0. 공통 첫 5분 (어떤 알람이든 이 순서)
 
 1. **시각 기록** — Slack 카드 수신 시각(초 단위). MTTD/회고의 기준점.
-2. **사용자 영향 확인**:
+2. **사용자 영향 확인** — **두 엔드포인트를 함께 본다.** 하나만 보면 2026-08-16 로테이션 장애(66시간 무탐지)를 놓친 것과 같은 실수를 반복한다:
    ```bash
-   curl -sk -o /dev/null -w '%{http_code}\n' --max-time 5 https://lpulse.live/healthz
+   curl -sk -o /dev/null -w 'healthz %{http_code}\n' --max-time 5 https://lpulse.live/healthz
+   curl -sk -o /dev/null -w 'readyz  %{http_code}\n' --max-time 5 https://lpulse.live/readyz
    ```
-   - `200` → 영향 없음/미미. 침착하게 해당 알람 절로.
-   - `503`/timeout → **다운. 먼저 `alb-elb-5xx`(§2)와 0-4의 `describe-services`(desired/running)를 본다.** GameDay 실측(2026-07-06): 전면 다운 시 **실제로 가장 먼저·일관되게 울린 건 `alb-elb-5xx`**(MTTD 3~5분)였고, `no-healthy-hosts`(§1)·`running-tasks-low`(§8)는 **늦거나(복구 후) 아예 침묵**했다. **무트래픽 다운(새벽 등 실사용 0)이어도 P4(c) canary가 `lpulse.live/healthz`를 상시 외부 프로빙(§13)**하므로, 그 synthetic 요청으로 `alb-elb-5xx`가 발화하고 canary 자신의 `canary_down`(§13, us-east-1)이 결정론적 백스톱이 된다. `no-healthy-hosts`(§1)는 **느린 최후 백스톱**으로만 남고 MTTD 신호로 신뢰하지 않는다(회고 A-5, [ADR 0004](../adr/0004-notraffic-canary.md)).
+   - `/healthz` = **liveness**. 프로세스가 살아 요청을 처리하는지만 본다 — **DB를 조회하지 않는다.**
+   - `/readyz` = **readiness**. DB 핑까지 하고 실패하면 503이다. P4(d)-2부터 canary(§13)가 프로빙하는 경로다.
+   - **둘 다 `200`** → 영향 없음/미미. 침착하게 해당 알람 절로.
+   - **`healthz 200` + `readyz 503`** → 프로세스는 살아 있고 **DB 연결이 끊긴 것**이다. 오탐이 아니라 **실장애**다 → **§3(앱 5xx)의 "DB 연결 실패" 경로**로 간다. 2026-08-16 장애가 정확히 이 모양이었다.
+   - **`healthz`도 `503`/timeout** → **다운. 먼저 `alb-elb-5xx`(§2)와 0-4의 `describe-services`(desired/running)를 본다.** GameDay 실측(2026-07-06): 전면 다운 시 **실제로 가장 먼저·일관되게 울린 건 `alb-elb-5xx`**(MTTD 3~5분)였고, `no-healthy-hosts`(§1)·`running-tasks-low`(§8)는 **늦거나(복구 후) 아예 침묵**했다. **무트래픽 다운(새벽 등 실사용 0)이어도 P4(c) canary가 `lpulse.live/readyz`를 상시 외부 프로빙(§13)**하므로, 그 synthetic 요청으로 `alb-elb-5xx`가 발화하고 canary 자신의 `canary_down`(§13, us-east-1)이 결정론적 백스톱이 된다. `no-healthy-hosts`(§1)는 **느린 최후 백스톱**으로만 남고 MTTD 신호로 신뢰하지 않는다(회고 A-5, [ADR 0004](../adr/0004-notraffic-canary.md)).
 3. **비정상 알람 전수 확인** (동반 알람 조합이 원인을 말해준다). **두 리전 모두 본다** — 12개 알람은 ap-northeast-2, 무트래픽 canary(§13)는 **us-east-1**에 있다(빠뜨리면 canary 다운을 놓친다):
    ```bash
    aws cloudwatch describe-alarms --alarm-name-prefix linkpulse-prod \
@@ -75,7 +80,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 ### §2 `linkpulse-prod-alb-elb-5xx` — ALB 자신이 낸 5xx ≥5/5분
 
 - **의미**: 요청이 타깃까지 못 갔다 — 503(정상 타깃 없음)·502(타깃 연결 거부/비정상 응답)·504(타임아웃). 사용자에게 오류가 **보이고 있다**. dimension이 LB 전용이라 타깃 5xx(§3)와 구분된다.
-- **전면 다운의 1순위 신호(실측)**: GameDay 2회 모두 이 알람이 전면 다운을 **가장 먼저**(MTTD 3분37초·4분54초) 감지했다 — 503이 뜨면 §1보다 이 절을 먼저 본다. **P4(c) canary 도입 후에는 실사용 트래픽이 0이어도 canary의 `/healthz` synthetic 프로빙이 ALB 503을 만들어 이 알람이 발화**하므로 무트래픽에서도 1순위다(canary 자체 liveness는 §13 `canary_down`). canary·외부 요청까지 전부 없는 극단에서만 이 알람이 침묵하고, 그때는 §1(느린 백스톱)이 최후 보루다.
+- **전면 다운의 1순위 신호(실측)**: GameDay 2회 모두 이 알람이 전면 다운을 **가장 먼저**(MTTD 3분37초·4분54초) 감지했다 — 503이 뜨면 §1보다 이 절을 먼저 본다. **P4(c) canary 도입 후에는 실사용 트래픽이 0이어도 canary의 synthetic 프로빙이 ALB 503을 만들어 이 알람이 발화**하므로 무트래픽에서도 1순위다(canary 자체 신호는 §13 `canary_down`). **단 이는 타깃이 전부 빠진 전면 다운에 한정된다** — P4(d)-2에서 canary 경로가 `/readyz`로 바뀌었고, DB 장애에서는 ALB 타깃그룹이 여전히 `/healthz`를 보고 healthy를 유지하므로 canary의 503은 **ALB가 아니라 앱이 낸 5xx**다 → 이 알람이 아니라 **`alb-target-5xx`(§3)** 가 1순위다. canary·외부 요청까지 전부 없는 극단에서만 이 알람이 침묵하고, 그때는 §1(느린 백스톱)이 최후 보루다.
 - **⚠ OK 통지는 신뢰하지 말 것(회복 판정용 아님)**: 이 지표(`HTTPCode_ELB_5XX_Count`)는 **sparse 카운트**(5xx=0이면 데이터포인트 부재)라, 복구 후 missing→`notBreaching` 확정에 시간이 크게 걸린다 — 실측 OK 지연이 **복구 후 2분49초~17분26초**로 편차가 컸다. **회복 여부는 OK 알림을 기다리지 말고 `curl .../healthz`=200 + 0-4의 `running=desired`로 직접 확인**(MTTR 기준점). (회고 A-9)
 - **먼저**: §1 동반 여부(0-3) — 동반이면 §1 절차가 곧 복구. 단독이면:
   - **502 위주**: 태스크가 죽는 순간의 잔여 연결 가능성 → 0-4 events·R-6(방금 태스크 교체가 있었나), R-5.
@@ -187,10 +192,13 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 
 ### §13 `linkpulse-prod-canary-down` — Route53 헬스체크 DOWN = 무트래픽 방어선 (us-east-1 알람)
 
-무트래픽 다운의 **1차 방어선**이다(회고 A-5·A-10, [ADR 0004](../adr/0004-notraffic-canary.md)). Route53 헬스체크가 `lpulse.live/healthz`를 외부에서 상시 프로빙해, 실사용 트래픽이 0이어도 `HealthCheckStatus`(1=정상/0=다운)로 down을 잡는다. **이 알람·지표는 us-east-1에만 있다** — 조회는 전부 `--region us-east-1`.
+무트래픽 다운의 **1차 방어선**이다(회고 A-5·A-10, [ADR 0004](../adr/0004-notraffic-canary.md)). Route53 헬스체크가 `lpulse.live/readyz`를 외부에서 상시 프로빙해, 실사용 트래픽이 0이어도 `HealthCheckStatus`(1=정상/0=다운)로 down을 잡는다. **이 알람·지표는 us-east-1에만 있다** — 조회는 전부 `--region us-east-1`.
+
+**P4(d)-2에서 프로빙 경로가 `/healthz` → `/readyz`로 바뀌었다.** 그래서 이 알람은 이제 프로세스 다운뿐 아니라 **DB 연결 장애**도 잡는다. 2026-08-16 RDS 비밀번호 로테이션 장애 때 `/healthz`는 DB를 보지 않아 66시간 내내 200을 반환했고, canary와 ALB 타깃그룹이 **둘 다 `/healthz`** 를 보고 있어 어느 쪽도 발화하지 못했다. ⚠️ **다만 실제 DB 장애에서 이 알람이 울린다는 실측은 아직 없다**(plan 0010의 탐지 드릴이 담당). 그전까지는 `alb-target-5xx`(§3)를 함께 감시한다.
 
 - **⚠ 최초 발행 레이스**: 헬스체크 생성 직후 지표 최초 발행 전 공백이 `breaching`으로 잡혀 **서비스는 정상인데 down 카드가 1회** 뜰 수 있다. **첫 canary ALARM은 아래 진위 확인 전까지 실장애로 단정하지 않는다.**
-- **먼저(진위 확인)**: §0-2 `curl .../healthz`가 `200`이면 오탐 의심 → 헬스체크 상태·지표 발행 확인:
+- **먼저(진위 확인)**: §0-2의 **두 curl을 함께** 본다. **`/healthz` 200만으로 오탐이라고 판단하지 않는다** — DB 장애에서는 `healthz 200` + `readyz 503`이 **정상적인 실장애 신호**다(2026-08-16 장애를 66시간 놓친 오판이 정확히 이것이었다).
+  - `healthz 200` + `readyz 200`(둘 다 정상)일 때만 오탐을 의심하고, 헬스체크 상태·지표 발행을 확인한다:
   ```bash
   aws cloudwatch describe-alarms --alarm-names linkpulse-prod-canary-down \
     --query 'MetricAlarms[0].[StateValue,StateReason]' --output table --region us-east-1
@@ -201,8 +209,15 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
     --dimensions Name=HealthCheckId,Value="$HCID" --statistics Minimum --period 60 \
     --start-time <ISO8601> --end-time <ISO8601> --region us-east-1
   ```
-  `503`/timeout이면 **진짜 다운** → `alb-elb-5xx`(§2)도 곧/이미 발화한다. §2/§1 경로로 복구(**R-1/R-1e**, desired=0이면 **R-2**).
-- **역할 분리(MTTD)**: `alb-elb-5xx`(canary 트래픽 기반 ~3–5분)=빠른 1차, `canary_down`(≈flip 90s + 알람 3분)=결정론적 백스톱. 둘 다 `no-healthy-hosts`(§1, 9분48초/무발화)보다 빠르다 — S2 확인 순서는 여전히 **§2 우선**.
+- **대응 분기(§0-2 curl 결과로 갈린다)**:
+  1. **`healthz` 503/timeout** → **전면 다운.** `alb-elb-5xx`(§2)도 곧/이미 발화한다 → **§2/§1** 경로로 복구(**R-1/R-1e**, desired=0이면 **R-2**).
+  2. **`healthz 200` + `readyz 503`** → **DB 연결 장애.** 이때 ALB 타깃은 `/healthz`로 healthy를 유지하므로 **`alb-elb-5xx`는 울리지 않고 `alb-target-5xx`(§3)가 울린다** → 진단은 **§3의 "DB 연결 실패/고갈"** 경로(로그의 connection 계열 에러 → §12 → RDS 상태). **비밀번호 로테이션 직후라면** → [`secret-rotation-bridge.md`](secret-rotation-bridge.md)의 (a)~(c)를 그대로 따른다(`LastRotatedDate` 확인 → [사람] `force-new-deployment` → `/readyz` 200 + 링크 왕복). 근본 대응은 plan 0009.
+  3. **둘 다 200인데 알람이 지속** → 오탐 후보. 최초 발행 레이스(위)이거나, `/readyz` 응답이 Route53의 **2초 제한**에 걸린 경우다. 후자는 외부에서 `curl -w '%{time_connect} %{time_starttransfer}'`로 `/readyz`를 여러 번 재어 **`time_starttransfer - time_connect`** 가 2초에 얼마나 가까운지 확인한다(운영자 위치 지연이라 참고값).
+- **역할 분리(MTTD) — 장애 종류에 따라 1순위가 다르다**:
+  - **전면 다운**(프로세스·태스크가 없음): `alb-elb-5xx`(canary 트래픽 기반 실측 3분37초·4분54초)=빠른 1차, `canary_down`(≈flip 90s + 알람 3분, 실측 5분47초)=결정론적 백스톱. 확인 순서는 여전히 **§2 우선**.
+  - **DB 장애**(프로세스는 살아 있음): 타깃이 `/healthz`로 healthy를 유지해 ALB가 503을 만들지 않으므로 **`alb-elb-5xx`는 울리지 않는다.** canary의 503이 앱 5xx로 집계돼 **`alb-target-5xx`(§3)가 1순위**이고, `canary_down`이 백스톱이다. 확인 순서는 **§3 우선**.
+  - 두 경우 모두 `no-healthy-hosts`(§1, 9분48초/무발화)보다 빠르다.
+  - **MTTD 실측값: plan 0010 실측 후 기입.** 위 숫자는 P4(c) 전면 다운 드릴 실측이며, DB 장애 경로는 아직 실측되지 않았다.
 - **통지가 안 오면**: 이 알람은 **us-east-1 전용 토픽**(`sns_canary_topic_arn`)→Chatbot 경로다. `aws sns list-subscriptions-by-topic --topic-arn "$(terraform output -raw sns_canary_topic_arn)" --region us-east-1`로 구독 실존 확인(`infra/README.md` §모니터링).
 
 ---
