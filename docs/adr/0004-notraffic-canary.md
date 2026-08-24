@@ -42,16 +42,32 @@ GameDay(P3-2) 실측에서 드러난 **무트래픽 사각지대**(회고 A-5·A
 - **liveness 백스톱을 잃지 않는다.** 프로세스가 죽으면 `/readyz`도 응답하지 못하므로 `/readyz`는 `/healthz`의 **상위집합**이다.
 - **DNS 영향 0.** 이 헬스체크는 어떤 Route53 레코드에도 연결돼 있지 않다(`health_check_id` 참조 0건, `failover` 정책 없음).
   순수 알람 트리거 전용이라 경로를 바꿔도 트래픽 라우팅이 바뀌지 않는다.
-- **응답 시간 마진.** Route53은 연결 후 **2초 안에** 2xx/3xx를 받아야 healthy로 본다(위 1차 출처).
-  `/readyz`의 DB 핑 타임아웃이 그대로 2초면 **마진이 0**이라 정상 DB에서도 오탐이 난다 →
-  `readinessTimeout`을 **1초**로 낮췄다(`app/internal/httpapi/health.go`). 그래서 **앱 배포가 이 경로 변경보다 먼저** 나가야 한다.
+- **응답 시간 예산.** Route53은 **연결 후 2초 안에** 2xx/3xx를 받아야 healthy로 본다(위 1차 출처).
+  `/readyz`의 DB 핑 상한도 2초면 **앱이 503을 확정하는 순간과 Route53이 포기하는 순간이 겹친다** —
+  Route53에는 타임아웃으로만 보여 앱의 판정(503)이 전달되지 않는다.
+  `slog.Warn("레디니스 점검 실패")` **자체는 남지만** 기록되는 사유가 실제 DB 에러가 아니라
+  취소·deadline 계열 오류(`context canceled` 등)로 **대체될 수 있어 진단 내용을 잃는다.**
+  (전제: 핸들러 ctx가 `r.Context()` 파생이라 클라이언트 중단이 전파된다 — 앱 쪽은 코드로 확인했으나
+  **ALB가 Route53의 끊김을 타깃 연결까지 전파하는지는 미실증**이다. 이 전제가 거짓이어도
+  "2초 경계에서는 원인 진단이 불안정하다"는 결론과 1초 선택은 바뀌지 않는다.)
+  그래서 `readinessTimeout`을 **1초**로 낮췄다(`app/internal/httpapi/health.go`).
+  **오탐을 막는 장치가 아니다** — 정상 DB 핑은 수 ms라 상한이 1초든 2초든 결과가 같다.
+  이 값의 내용은 "DB 핑이 1초를 넘으면 준비되지 않은 것으로 본다"는 판단이고, 그 대가로
+  1초~2초대의 느린 핑은 2초 상한에서라면 healthy였을 것이 이제 unhealthy가 된다(의도한 바다).
+  **앱 배포가 이 경로 변경보다 먼저** 나가야 하는 이유도 오탐이 아니라 이 판정 일치다.
+- **2초 예산의 시작점은 TCP 연결 직후다.** 원문이 *"within two seconds **after connecting**"* 이므로
+  **TLS 핸드셰이크가 이 2초 안에 들어간다** — 앱에 실제로 허용되는 시간은 2초에서 핸드셰이크만큼 짧다.
+  런북 §13이 `time_starttransfer - time_connect`(= TLS 포함 구간)를 재라고 하는 근거가 이것이다.
 - **ALB 타깃그룹은 `/healthz` 그대로 둔다.** 타깃그룹까지 readiness로 바꾸면 DB 장애 시 두 타깃이 모두 unhealthy가 돼
   ECS 태스크 교체가 도는 별개의 트레이드오프가 생긴다. 그 결과 **DB 장애에서는 타깃이 healthy를 유지해
   `alb-elb-5xx`가 아니라 `alb-target-5xx`가 1순위 신호**가 된다(runbook §13의 역할 분리).
 
 **아직 실증되지 않은 것.** 이 경로가 *실제 DB 장애에서* `canary_down`을 울린다는 실측은 없다.
 plan 0008은 정상 상태 확인까지이고, 의도적 DB 장애 드릴은 **plan 0010**이 맡는다. 그전까지 2026-08-23 로테이션은
-사람이 수행하는 마감 브릿지(로테이션 직후 `force-new-deployment`)로 막는다. 로테이션 근본 대응은 **plan 0009**.
+사람이 수행하는 마감 브릿지(회전 감지 후 `force-new-deployment`)로 **완화한다 — 막지는 못한다.**
+회전이 약 24시간 창 안의 임의 시점에 일어나는데 사람의 폴링으로는 그 창을 다 덮을 수 없어,
+**다운 시간의 상한을 폴링 간격까지 줄일 뿐 0으로 만들지 못한다**(`docs/runbooks/secret-rotation-bridge.md`).
+창을 좁히거나 앱이 회전을 견디게 하는 근본 대응은 **plan 0009**다.
 
 ### 2. 크로스리전 배선 (채택안의 유일한 함정)
 
@@ -100,7 +116,20 @@ apex `lpulse.live`는 ALB alias(A) 레코드이고 `evaluate_target_health = tru
 ## 결과 / 트레이드오프 (운영자가 알아야 할 함정)
 
 - **최초 apply 오탐 카드 레이스.** 헬스체크와 `canary_down`을 동시에 만들면, `HealthCheckStatus`가 us-east-1에 **최초 발행되기 전 공백**이 `breaching`으로 취급돼 **서비스는 정상인데 down 카드가 1회** 뜰 수 있다(기존 12 breaching 알람은 대상 지표가 이미 존재해 이 레이스가 없었다). 발행(~1–2분)이 알람 창(3분)보다 빠를 공산이 크나 레이스는 실재한다. **완화**: (a) 헬스체크 먼저 apply→`list-metrics`로 발행·Healthy 확인→알람 2단계 apply, 또는 (b) 단일 apply 시 "**첫 canary ALARM은 preflight/`list-metrics`로 진위 확인 전까지 장애로 단정하지 않는다**"(runbook에 명시).
-- **canary 자기발 트래픽.** 상시 프로빙으로 `alb-target-5xx`·`alb-latency-p95`에 항상 샘플이 생긴다 → 정상 200/저지연이면 무해. `/readyz`도 `/healthz`와 같이 레이트리밋 예외(`ratelimit.go`의 `tierExempt`)라 429 오탐 없음. **단 §1-a 이후로는 DB 장애 시 canary가 분당 약 33건의 503을 만든다** — 이것이 `alb-target-5xx`를 빠르게·지속적으로 발화시키는 탐지 신호이자, 동시에 그 알람의 소음원이다(양면. 다만 canary는 30초마다 확실히 오므로 장애 중에는 ALARM에 고정돼 플래핑하지 않는다).
+- **canary 자기발 트래픽.** 상시 프로빙으로 `alb-target-5xx`·`alb-latency-p95`에 항상 샘플이 생긴다 → 정상 200/저지연이면 무해. `/readyz`도 `/healthz`와 같이 레이트리밋 예외(`ratelimit.go`의 `tierExempt`)라 429 오탐 없음. **단 §1-a 이후로는 DB 장애 시 canary가 분당 약 33건의 503을 만든다**(추정이 아니라 실측 — 2026-08-16 장애 증거의 canary 트래픽 시간당 약 1,976건 ÷ 60 ≈ 32.9건/분. `regions` 미지정이라 기본 전체 리전 체커가 30초 주기로 프로빙한 결과다) — 이것이 `alb-target-5xx`를 빠르게·지속적으로 발화시키는 탐지 신호이자, 동시에 그 알람의 소음원이다(양면. 다만 canary는 30초마다 확실히 오므로 장애 중에는 ALARM에 고정돼 플래핑하지 않는다).
+- **RDS 유지보수·재부팅이 새 발화원이 된다(§1-a 이후).** `rds.tf`는 `multi_az = false`이고 `maintenance_window`는
+  미설정(AWS가 임의 배정)이다. canary가 `/readyz`를 보게 된 뒤로는 마이너 버전 유지보수·재부팅 중 canary가 503을 만든다
+  (`/healthz` 시절에는 침묵했다). **두 알람은 임계의 의미가 서로 달라 민감도가 반대다** — 하나로 묶어 읽으면 안 된다.
+  - `canary_down`: `failure_threshold=3`(30초×3)에 알람 평가 3분(60초×3)이 더 붙어 **약 4분 30초 이상** 끊겨야
+    발화한다 → **짧은 재부팅은 지나간다.**
+  - `alb-target-5xx`: 지속시간이 아니라 **건수 임계**다(`Sum`/`period=300`/`evaluation_periods=1`/`threshold=5`
+    — `monitoring.tf`). 300초는 지속 요건이 아니라 합산 구간일 뿐이라, 위에서 실측한 약 33건/분을 대입하면
+    5건이 **약 9초**에 쌓인다 → **30초짜리 재부팅(약 16건)에도 발화한다.**
+
+  즉 canary를 `/readyz`로 옮긴 결과 `alb-target-5xx`는 **10초 안팎의 DB 블립에도 우는 알람이 됐다.**
+  이 민감도 상승이 §1-a의 탐지 이득과 같은 동전의 뒷면이다.
+  DB가 실제로 끊긴 것이므로 발화 자체는 정상이지만, 새벽 페이지를 실장애로 오진하지 않으려면
+  **직전 RDS 유지보수 창 여부를 먼저 확인**해야 한다(런북 §13 분기 2).
 - **크로스리전 오배선.** us-east-1 알람이 ap-northeast-2 토픽을 가리키면 카드가 안 온다 → 알람은 반드시 `canary_use1`(us-east-1) 토픽에 붙인다. plan에서 알람 리전·토픽 ARN 리전 일치 육안 확인, apply 전 비파괴 preflight(`set-alarm-state --region us-east-1`)로 실배선 검증.
 - **AWS 이름/description은 ASCII만.** SNS 토픽·알람 이름·description에 한글을 넣으면 apply가 깨진다(validate·plan은 통과 — [[aws-descriptions-ascii-only]]).
 - **비용.** 헬스체크 HTTPS ≈ $0.50(AWS 엔드포인트)+$1.00(HTTPS) ≈ **$1.50/월**, 신규 알람 ~$0.10/월, us-east-1 SNS publish 무시가능. string-matching·fast-interval(10s)은 각 +$1이라 미사용(30초 표준 주기). 총 증분 ≈ **$1.6/월**. 사람이 과금 인지 후 apply.

@@ -52,9 +52,13 @@ resource "aws_sns_topic_policy" "canary_use1" {
 # ---- Route53 헬스체크 (상시 synthetic canary) ----
 # HTTPS로 lpulse.live/readyz를 30초 주기 프로빙. string-match/measure_latency 미사용(비용 — 각 +$1/월):
 # string match 없이 Route53는 2xx/3xx 응답을 healthy로 판정하고(/readyz는 정상 시 200, DB 연결 실패 시
-# 503), 3회 연속 실패 시 unhealthy로 전환한다. Route53은 연결 후 2초 안에 2xx/3xx를 받아야 healthy로
-# 보므로, 앱의 레디니스 DB 핑 상한을 1초로 낮춰 마진을 확보한 뒤에 이 경로를 적용해야 한다
-# (app/internal/httpapi/health.go readinessTimeout — 순서가 뒤집히면 마진 0 상태로 프로빙된다). enable_sni=true는 ALB가 SNI로 인증서를 고르므로 필수. 리소스는 글로벌이라
+# 503), 3회 연속 실패 시 unhealthy로 전환한다.
+# Route53은 연결 후 2초 안에 2xx/3xx를 받아야 healthy로 보는데, 앱의 레디니스 DB 핑 상한도 2초면
+# 앱이 503을 확정하는 순간과 Route53이 포기하는 순간이 겹쳐 503이 전달되지 않고, 로그에도
+# 실제 DB 에러 대신 취소·deadline 계열 오류만 남을 수 있다.
+# 그래서 상한을 1초로 낮춘 앱이 먼저 라이브에 나간 뒤 이 경로를 적용한다
+# (app/internal/httpapi/health.go readinessTimeout). 오탐 방지가 아니라 판정 일치가 목적이다.
+# enable_sni=true는 ALB가 SNI로 인증서를 고르므로 필수. 리소스는 글로벌이라
 # 기본 provider로 만든다("Route 53 is a global service, so you don't specify the region" — ADR 0004).
 # ALB SG는 443을 0.0.0.0/0에 개방(security_groups.tf)해 글로벌 헬스체커가 도달 가능 — SG 변경 불요.
 resource "aws_route53_health_check" "canary" {

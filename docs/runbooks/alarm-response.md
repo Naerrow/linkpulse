@@ -6,7 +6,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 - 알람 정의(임계값의 소스오브트루스): `infra/prod/monitoring.tf` — **임계값은 전부 초기값**, 오탐이 반복되면 §튜닝 노트를 보고 Terraform으로 조정(사람 apply)
 - 표기: 명령은 read-only가 기본. 상태를 바꾸는 명령은 **[사람]** 표기 — 에이전트 자율 실행 금지(가드레일 #1)
 - 로그 조회 쿼리 모음·Slack 배선 점검은 [`infra/README.md`](../../infra/README.md) 참고
-- **예정된 RDS 비밀번호 로테이션(7일 주기, 다음 2026-08-23)** 은 알람을 기다리지 말고 [`secret-rotation-bridge.md`](secret-rotation-bridge.md)를 **선제적으로** 수행한다 — 이 절차를 놓쳐 2026-08-16에 66시간 다운이 났다
+- **예정된 RDS 비밀번호 로테이션**(7일 주기)은 알람을 기다리지 말고 [`secret-rotation-bridge.md`](secret-rotation-bridge.md)를 **선제적으로** 수행한다 — 이 절차를 놓쳐 2026-08-16에 66시간 다운이 났다. ⚠️ **로테이션은 시각이 아니라 약 24시간짜리 창이다** — 다음 창은 **예시로 2026-08-23 09:00 ~ 08-24 08:59:59 KST**처럼 **두 날짜에 걸친다**(이 날짜는 작성 시점 실측값이라 지나면 무효다). 08-23이 지났다고 감시를 접으면 창의 마지막 9시간을 놓친다. 실제 창은 브릿지 (a)로 매번 재계산한다
 
 ---
 
@@ -211,7 +211,19 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
   ```
 - **대응 분기(§0-2 curl 결과로 갈린다)**:
   1. **`healthz` 503/timeout** → **전면 다운.** `alb-elb-5xx`(§2)도 곧/이미 발화한다 → **§2/§1** 경로로 복구(**R-1/R-1e**, desired=0이면 **R-2**).
-  2. **`healthz 200` + `readyz 503`** → **DB 연결 장애.** 이때 ALB 타깃은 `/healthz`로 healthy를 유지하므로 **`alb-elb-5xx`는 울리지 않고 `alb-target-5xx`(§3)가 울린다** → 진단은 **§3의 "DB 연결 실패/고갈"** 경로(로그의 connection 계열 에러 → §12 → RDS 상태). **비밀번호 로테이션 직후라면** → [`secret-rotation-bridge.md`](secret-rotation-bridge.md)의 (a)~(c)를 그대로 따른다(`LastRotatedDate` 확인 → [사람] `force-new-deployment` → `/readyz` 200 + 링크 왕복). 근본 대응은 plan 0009.
+  2. **`healthz 200` + `readyz 503`** → **DB 연결 장애.** 이때 ALB 타깃은 `/healthz`로 healthy를 유지하므로 **`alb-elb-5xx`는 울리지 않고 `alb-target-5xx`(§3)가 울린다** → 진단은 **§3의 "DB 연결 실패/고갈"** 경로(로그의 connection 계열 에러 → §12 → RDS 상태). **먼저 RDS 유지보수·재부팅 여부**를 본다 — 아래 **세 가지를 함께** 봐야 한다. `describe-events`는 *최근 생성된 이벤트*를 돌려줄 뿐 **지금 유지보수 중이라는 증거가 아니다.**
+     ```bash
+     R="--region ap-northeast-2"; ID=linkpulse-prod-pg
+     aws rds describe-events --source-identifier $ID --source-type db-instance --duration 120 $R  # 단위: 분(최근 2시간)
+     aws rds describe-db-instances --db-instance-identifier $ID --query 'DBInstances[0].DBInstanceStatus' $R
+     aws rds describe-pending-maintenance-actions --filters Name=db-instance-id,Values=$ID $R  # 필터 없으면 계정 전체가 나온다
+     ```
+     **`DBInstanceStatus` 값으로 갈린다 — "`available`이 아니다"만으로 유지보수라고 보면 안 된다.** RDS의 비정상 상태에는 즉시 대응해야 할 것이 섞여 있다([AWS DB 인스턴스 상태 표](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/accessing-monitoring.html)).
+     - **`maintenance`·`rebooting`·`modifying`·`upgrading`** *이면서* `describe-events`나 pending action이 **이 DB를 대상으로 같은 시각대에** 걸려 있을 때만 유지보수/재부팅으로 본다. 그때는 관찰하되 **상한 15분**을 둔다 — 15분 안에 `available` + `/readyz` 200으로 돌아오지 않으면 유지보수 분류를 버리고 아래 로테이션 확인과 §3 진단을 진행한다. (별개 장애가 최근 유지보수 이벤트와 겹치면 무기한 기다리게 된다.)
+     - **`storage-full`·`failed`·`incompatible-*`·`inaccessible-encryption-credentials`** → **기다리지 않는다.** 관찰 없이 곧바로 §3 진단으로 간다(AWS는 `storage-full`을 즉시 조치 대상으로 명시한다).
+     - **그 밖의 값(`available` 포함)** → 유지보수가 아니다. 아래 로테이션 확인과 §3 진단을 진행한다.
+
+     **비밀번호 로테이션 직후라면** → [`secret-rotation-bridge.md`](secret-rotation-bridge.md)의 (a)~(c)를 그대로 따른다(`LastRotatedDate` 확인 → [사람] `force-new-deployment` → `/readyz` 200 + 링크 왕복). 근본 대응은 plan 0009.
   3. **둘 다 200인데 알람이 지속** → 오탐 후보. 최초 발행 레이스(위)이거나, `/readyz` 응답이 Route53의 **2초 제한**에 걸린 경우다. 후자는 외부에서 `curl -w '%{time_connect} %{time_starttransfer}'`로 `/readyz`를 여러 번 재어 **`time_starttransfer - time_connect`** 가 2초에 얼마나 가까운지 확인한다(운영자 위치 지연이라 참고값).
 - **역할 분리(MTTD) — 장애 종류에 따라 1순위가 다르다**:
   - **전면 다운**(프로세스·태스크가 없음): `alb-elb-5xx`(canary 트래픽 기반 실측 3분37초·4분54초)=빠른 1차, `canary_down`(≈flip 90s + 알람 3분, 실측 5분47초)=결정론적 백스톱. 확인 순서는 여전히 **§2 우선**.
