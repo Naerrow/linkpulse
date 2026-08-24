@@ -30,7 +30,7 @@ const (
 	readHeaderTimeout = 5 * time.Second
 	// 본문까지 포함한 요청 전체 수신 상한. 본문은 8KiB로 이미 제한돼 있어 넉넉하다.
 	readTimeout = 10 * time.Second
-	// 응답 쓰기 상한. 레디니스 DB 핑 상한(2s, health.go)과 여유를 둔 값.
+	// 응답 쓰기 상한. 레디니스 DB 핑 상한(1s, health.go)과 여유를 둔 값.
 	writeTimeout = 15 * time.Second
 	// keep-alive 유휴 연결 상한.
 	idleTimeout = 60 * time.Second
