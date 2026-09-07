@@ -35,3 +35,16 @@ image_tag = "bootstrap"
 # 준비 전이면 둘 다 비워 알람+SNS만 먼저 apply한다(Slack 배선 스킵).
 # slack_team_id    = "T0123ABCD"
 # slack_channel_id = "C0123ABCDEF"
+
+# ---- 알람 SMS (2026-08-30 장애 A-1b) ----
+# Slack 카드는 도착했는데 사람에게 닿지 않아 118시간 갔다. Slack 앱 설정과 독립된 두 번째 경로.
+# E.164 형식(국가번호 포함, 하이픈 없음). 비우면 SMS 구독을 만들지 않는다.
+#
+# ⚠️ apply 전에 SNS SMS 샌드박스를 먼저 확인한다. 샌드박스 상태면 "검증된 번호"에만 발송되므로
+#    구독은 만들어져도 문자가 오지 않는다(조용히 실패한다):
+#      aws sns get-sms-sandbox-account-status --region ap-northeast-2
+#      aws sns create-sms-sandbox-phone-number --phone-number +8210XXXXXXXX --region ap-northeast-2
+#      aws sns verify-sms-sandbox-phone-number --phone-number +8210XXXXXXXX --one-time-password 123456 --region ap-northeast-2
+#    us-east-1 토픽도 쓰므로 **두 리전 각각** 확인·검증한다(샌드박스 상태는 리전별이다).
+# ⚠️ 이 값은 tfstate에 평문으로 남는다(S3 백엔드). 개인 번호이므로 감수 여부를 판단하고 쓴다.
+# alarm_sms_number = "+8210XXXXXXXX"

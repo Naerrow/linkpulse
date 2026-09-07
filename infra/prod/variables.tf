@@ -122,6 +122,13 @@ variable "alb_access_logs_bucket" {
   default     = ""
 }
 
+variable "alarm_sms_number" {
+  description = "알람 SMS 수신 번호(E.164, 예: +821012345678). 비우면 SMS 구독을 만들지 않는다. Slack 경로가 죽었을 때의 두 번째 경로 — 2026-08-30 장애(118시간)에서 Slack 카드는 도착했는데 사람에게 닿지 않았다."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "ecr_force_delete" {
   description = "ECR repo 삭제 시 이미지까지 강제 삭제할지 여부. 개발용 full destroy 때만 true로 넘긴다."
   type        = bool
