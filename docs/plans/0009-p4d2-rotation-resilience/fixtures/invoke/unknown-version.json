@@ -1,0 +1,17 @@
+{
+  "version": "0",
+  "id": "manual-invoke-0000-0000-0000-000000000001",
+  "detail-type": "Secret Label Updated",
+  "source": "aws.secretsmanager",
+  "account": "REPLACE_ACCOUNT_ID",
+  "time": "2026-01-01T00:00:00Z",
+  "region": "ap-northeast-2",
+  "resources": [
+    "REPLACE_SECRET_ARN"
+  ],
+  "detail": {
+    "name": "REPLACE_SECRET_NAME",
+    "labelUpdated": "AWSCURRENT",
+    "versionId": "deadbeef-0000-0000-0000-000000000000"
+  }
+}
