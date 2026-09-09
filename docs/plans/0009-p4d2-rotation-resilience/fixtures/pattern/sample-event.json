@@ -1,0 +1,17 @@
+{
+  "version": "0",
+  "id": "6a7e8feb-0000-0000-0000-000000000000",
+  "detail-type": "Secret Label Updated",
+  "source": "aws.secretsmanager",
+  "account": "123456789012",
+  "time": "2026-09-14T00:12:34Z",
+  "region": "ap-northeast-2",
+  "resources": [
+    "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:rds!db-a1b2c3d4-0000-0000-0000-000000000000-AbCdEf"
+  ],
+  "detail": {
+    "name": "rds!db-a1b2c3d4-0000-0000-0000-000000000000",
+    "labelUpdated": "AWSCURRENT",
+    "versionId": "00000000-0000-0000-0000-000000000000"
+  }
+}

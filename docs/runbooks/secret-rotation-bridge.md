@@ -129,6 +129,67 @@ done
 
 ## (b) 실행 — 태스크 강제 재기동 [사람] ⚠️
 
+⚠️ **2026-09-09부터 이 일은 자동화됐다. (b)를 바로 실행하지 말고 (b-1)을 먼저 본다.**
+plan 0009 Step 1이 라이브다: `Secret Label Updated`(AWSCURRENT) 이벤트 → EventBridge rule →
+Lambda `linkpulse-prod-rotation-redeploy` → `UpdateService(forceNewDeployment)`.
+**정상이라면 회전 수 분 안에 재배포가 자동으로 시작된다.**
+**(b)는 폐지된 것이 아니라 그 자동화가 실패했을 때의 수동 절차로 남는다.**
+
+### (b-1) 자동 재배포가 돌았는지 먼저 확인한다 [read-only · 30초]
+
+```bash
+R=ap-northeast-2
+# ① Lambda가 무엇을 했나 — outcome 하나로 판정이 끝난다
+aws logs filter-log-events --log-group-name /aws/lambda/linkpulse-prod-rotation-redeploy \
+  --region $R --start-time $(( ($(date +%s) - 3600) * 1000 )) --query 'events[].message' --output text
+
+# ② 새 배포가 실제로 생겼나
+aws ecs describe-services --cluster linkpulse-prod-cluster --services linkpulse-prod-app --region $R \
+  --query 'services[0].deployments[].{Status:status,Rollout:rolloutState,Created:createdAt}' --output table
+```
+
+| ① `outcome` | 뜻 | 할 일 |
+| --- | --- | --- |
+| `redeploy_submitted` | 재배포를 **제출했다** | ②의 `rolloutState`를 본다. `COMPLETED`면 **(c)로 가서 확인만** 한다. `FAILED`거나 정체면 **(b) 수동 실행** |
+| `redeploy_submitted_raced_marker` | 위와 같다(동시 중복에서 marker 경합에 졌을 뿐) | 위와 같다 |
+| `skipped_duplicate` | 같은 `versionId`를 이미 처리했다 — **재배포를 부르지 않았다** | 앞선 호출이 만든 배포가 ②에 있어야 한다. **없으면 (b) 수동 실행** |
+| `failed_*` | 실패 지점이 이름에 있다(`failed_label_wait`/`failed_update_service`/`failed_putitem`/`failed_deadline`/`failed_getitem`/`failed_validation`) | **(b) 수동 실행** 후 (b-2)로 원인을 남긴다 |
+| **로그가 아예 없다** | 이벤트가 Lambda에 도달하지 못했다 | **(b) 수동 실행** 후 (b-2) 계층 1을 본다 |
+
+⚠️ **`redeploy_submitted`는 "제출됨"이지 "복구됨"이 아니다.** 롤아웃이 실패해 서킷브레이커가 롤백하면
+marker는 이미 남아 있어 **같은 회전에 대한 자동 재시도는 없다.** 그때 복구 주체는 사람이고 (b)가 그 절차다.
+
+### (b-2) 자동화가 실패했다면 — 어느 계층에서 끊겼는지 남긴다 [read-only]
+
+**복구((b))를 먼저 하고 이걸 한다.** 순서를 바꾸지 않는다.
+
+| 증상 | 계층 | 확인 |
+| --- | --- | --- |
+| Lambda 로그 없음 | **계층 1** — EventBridge가 Lambda에 전달하지 못했다 | `linkpulse-prod-rotation-events-dlq` 적재 · `rotation-rule-failed` 알람 |
+| Lambda 로그에 `failed_*` | **계층 2** — handler가 실행됐으나 실패 | `linkpulse-prod-rotation-redeploy-failures` 적재 · `rotation-redeploy-errors` 알람 |
+| 양쪽 큐 다 비었는데 재배포도 없음 | **전달 자체가 실패** — depth로는 안 보인다 | `rotation-rule-dlq-send-failed` · `rotation-redeploy-destination-failed` 알람 |
+| rule이 이벤트를 아예 못 잡음 | **패턴 미매칭**(무증상) | 광역 관찰 로그 `/aws/events/linkpulse-prod-secret-events`에 **원문**이 있는지 |
+
+```bash
+R=ap-northeast-2
+for q in rotation-events-dlq rotation-redeploy-failures; do
+  U=$(aws sqs get-queue-url --queue-name linkpulse-prod-$q --region $R --query QueueUrl --output text)
+  echo "$q = $(aws sqs get-queue-attributes --queue-url "$U" --attribute-names ApproximateNumberOfMessages \
+    --region $R --query 'Attributes.ApproximateNumberOfMessages' --output text)"
+done
+# 광역 관찰 rule의 실이벤트 원문 (rule이 패턴을 못 맞췄는지 여기서 갈린다)
+aws logs filter-log-events --log-group-name /aws/events/linkpulse-prod-secret-events \
+  --region $R --start-time $(( ($(date +%s) - 3600) * 1000 )) --query 'events[].message' --output text
+```
+
+⚠️ **DLQ depth 알람은 최대 15분 늦게 뜬다**(SQS는 비활성 큐가 활성화될 때 지표 전송이 지연된다).
+빠른 신호는 `rotation-rule-failed`·`rotation-redeploy-errors`·`*-destination-failed`(1분 지표)다.
+***"DLQ가 조용하니 괜찮다"로 판단하지 않는다.***
+
+---
+
+**아래가 (b) 수동 절차다 — (b-1)에서 필요하다고 판정됐을 때만 실행한다.**
+
 ```bash
 aws ecs update-service --cluster linkpulse-prod-cluster --service linkpulse-prod-app \
   --force-new-deployment --region ap-northeast-2
@@ -189,12 +250,15 @@ plan 0008이 넣은 것은 canary가 `/readyz`를 프로빙하게 만든 **탐�
 
 로테이션 주기가 7일이므로 이 절차가 덮는 것은 **회전 창 한 번**이다.
 
-**2026-09-04 실측**: `LastRotated=2026-08-30T13:08:48+09:00`, `NextRotationDate=2026-09-07T08:59:59+09:00`
-→ **다음 창 = 2026-09-06 09:00 ~ 09-07 08:59:59 KST.**
+**2026-09-09 실측**: `LastRotated=2026-09-07T10:06:07+09:00`, `NextRotationDate=2026-09-15T08:59:59+09:00`
+→ **다음 창 = 2026-09-14 09:00 ~ 09-15 08:59:59 KST.**
 
-plan 0009(근본 대응)의 Step 1 라이브 기한은 **2026-09-13 09:00 KST 전**이다(그 plan의 기한 표).
-**즉 09-06 창은 Step 1 없이 맞는다 — 이 런북이 유일한 방어다.**
-그리고 이 런북은 **세 번 연속 실행되지 않았다.** → **(f)를 먼저 수행한다.**
+✅ **2026-09-09에 plan 0009 Step 1이 라이브가 됐다 — 이 런북은 더 이상 유일한 방어가 아니다.**
+자동 재배포가 1차이고, 이 런북은 **그것이 실패했을 때의 백스톱**이다(판정은 (b-1)).
+
+⚠️ **다만 1-6 온디맨드 회전 드릴 전까지는 rule → Lambda 배선이 실증되지 않았다.**
+1-4 직접 invoke(2026-09-09)는 Lambda·멱등·on-failure를 증명했지만 **rule을 거치지 않는다.**
+**드릴을 하기 전에 09-14 창을 맞는다면 (f)를 그대로 수행한다** — 자동화를 믿고 브릿지를 생략하지 않는다.
 
 ---
 

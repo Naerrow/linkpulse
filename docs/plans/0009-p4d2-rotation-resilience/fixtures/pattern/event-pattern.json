@@ -1,0 +1,8 @@
+{
+  "source": ["aws.secretsmanager"],
+  "detail-type": ["Secret Label Updated"],
+  "resources": ["arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:rds!db-a1b2c3d4-0000-0000-0000-000000000000-AbCdEf"],
+  "detail": {
+    "labelUpdated": ["AWSCURRENT"]
+  }
+}

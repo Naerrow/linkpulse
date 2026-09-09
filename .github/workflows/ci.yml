@@ -33,6 +33,19 @@ jobs:
       - name: 단위 테스트
         run: make test
 
+      # rotation-redeploy Lambda의 handler 테스트. 별도 job으로 나누지 않는 이유는 러너 배정을
+      # 1회로 유지하기 위해서다(2026-07-09 배포 실패 회고 — job이 늘면 실패 표면이 커진다).
+      # 러너 기본 Python에 기대지 않고 Lambda 런타임과 같은 3.13으로 고정한다 — 버전이 다르면
+      # 수집·문법 드리프트가 CI에서 안 잡힌다. 외부 의존성이 없어 install 단계가 없다
+      # (테스트는 fake client를 넘기므로 boto3를 import하지 않는다).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Lambda handler 단위 테스트
+        working-directory: infra/prod/lambda/rotation_redeploy
+        run: python -m unittest discover -v
+
       # Dockerfile smoke test: PR에서 배포와 동일한 arm64 크로스빌드가 x86에서 성공하는지 확인한다.
       # deploy.yml이 x86 GA 러너 + buildx로 arm64를 크로스컴파일하므로(ADR 0001), 그 경로를 여기서
       # 미리 검증해 조용한 회귀를 막는다. --push/--load 없이 빌드만 해 성공 여부만 본다.
