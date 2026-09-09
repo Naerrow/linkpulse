@@ -17,6 +17,19 @@ resource "aws_sns_topic" "alarms" {
   tags = { Name = "${local.name_prefix}-alarms" }
 }
 
+# ---- SMS 구독: Slack이 죽었을 때의 두 번째 경로 ----
+# 왜: 2026-08-30 로테이션 장애에서 알람은 회전 +7분에 정확히 울렸고 Slack 카드도 채널에 도착했는데,
+# 사람에게 닿지 않아 118시간 갔다(docs/postmortems/2026-08-30-rds-rotation-outage.md A-1b).
+# Slack 모바일 푸시는 앱 설정에 의존하고 업데이트·재설치로 조용히 되돌아갈 수 있다 → 독립 경로를 둔다.
+# 노이즈: 3차 장애의 상태 전이는 알람당 2회뿐이었다(/readyz canary 전환으로 2차의 19회 플래핑이 사라졌다).
+# 시끄러우면 이 리소스만 지우고 canary 토픽 쪽(synthetic-canary.tf)만 남긴다.
+resource "aws_sns_topic_subscription" "alarms_sms" {
+  count     = var.alarm_sms_number != "" ? 1 : 0
+  topic_arn = aws_sns_topic.alarms.arn
+  protocol  = "sms"
+  endpoint  = var.alarm_sms_number
+}
+
 # CloudWatch 알람만 이 토픽에 publish 허용 + confused-deputy 방지(SourceArn/SourceAccount).
 resource "aws_sns_topic_policy" "alarms" {
   arn = aws_sns_topic.alarms.arn

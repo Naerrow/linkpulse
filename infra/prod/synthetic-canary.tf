@@ -26,6 +26,18 @@ resource "aws_sns_topic" "canary_use1" {
   tags     = { Name = "${local.name_prefix}-canary-alarms" }
 }
 
+# ---- SMS 구독 (us-east-1) ----
+# canary_down은 "/readyz가 3분간 DOWN" = 서비스가 죽었다는 최상위 신호다. monitoring.tf의
+# aws_sns_topic_subscription.alarms_sms 미러 — 단 provider가 aws.use1이다(토픽이 us-east-1에 있다).
+# 둘 중 하나만 남긴다면 이쪽이다.
+resource "aws_sns_topic_subscription" "canary_use1_sms" {
+  provider  = aws.use1
+  count     = var.alarm_sms_number != "" ? 1 : 0
+  topic_arn = aws_sns_topic.canary_use1.arn
+  protocol  = "sms"
+  endpoint  = var.alarm_sms_number
+}
+
 # CloudWatch 알람만 이 토픽에 publish 허용 + confused-deputy 방지(SourceArn/SourceAccount).
 # monitoring.tf의 aws_sns_topic_policy.alarms 미러 — 단 SourceArn 리전 리터럴이 us-east-1이다
 # (알람이 us-east-1에 있으므로). 계정 ID는 글로벌이라 기본 provider의 caller_identity를 그대로 쓴다.
