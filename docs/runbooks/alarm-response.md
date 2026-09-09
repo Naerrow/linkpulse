@@ -232,7 +232,15 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
      - **`storage-full`·`failed`·`incompatible-*`·`inaccessible-encryption-credentials`** → **기다리지 않는다.** 관찰 없이 곧바로 §3 진단으로 간다(AWS는 `storage-full`을 즉시 조치 대상으로 명시한다).
      - **그 밖의 값(`available` 포함)** → 유지보수가 아니다. 아래 로테이션 확인과 §3 진단을 진행한다.
 
-     **비밀번호 로테이션 직후라면** → [`secret-rotation-bridge.md`](secret-rotation-bridge.md)의 (a)~(c)를 그대로 따른다(`LastRotatedDate` 확인 → [사람] `force-new-deployment` → `/readyz` 200 + 링크 왕복). 근본 대응은 plan 0009.
+     **비밀번호 로테이션 직후라면** → ⚠️ **2026-09-09부터 순서가 바뀌었다. 수동 재배포보다 "자동 재배포가 돌았는지"를 먼저 본다.** plan 0009 Step 1이 라이브다(`Secret Label Updated` → EventBridge → Lambda → `UpdateService`).
+
+     1. **[`secret-rotation-bridge.md`](secret-rotation-bridge.md) (b-1)** — Lambda 로그의 `outcome` 하나로 판정이 끝난다. `redeploy_submitted`(+ `rolloutState=COMPLETED`)면 **확인만** 하면 되고, `failed_*`거나 **로그가 아예 없으면** 수동 브릿지로 간다.
+     2. 수동이 필요하면 같은 런북 **(a)~(c)**(`LastRotatedDate` 확인 → [사람] `force-new-deployment` → `/readyz` 200 + 링크 왕복).
+     3. 복구 후 **(b-2)로 어느 계층에서 끊겼는지 남긴다** — 계층 1(EventBridge 전달 실패, `rotation-events-dlq`) / 계층 2(handler 실패, `rotation-redeploy-failures`) / 전달 자체 실패(depth로는 안 보인다 — `rotation-rule-dlq-send-failed`·`rotation-redeploy-destination-failed`) / 패턴 미매칭(광역 관찰 로그 `/aws/events/linkpulse-prod-secret-events`에 원문이 있는지).
+
+     ⛔ **Step 2가 라이브가 아닌 동안 회전 직후의 `alb-target-5xx`는 전부 브릿지 대상이다.** 앱은 아직 런타임에 비밀번호를 다시 읽지 못하므로(근본 대응 = plan 0009 Step 2, 미착수) 회전 후 5xx는 짧게 끝나지 않고 **재배포가 완료될 때까지 수 분간 지속된다.** 자동 재배포가 돌았는지 먼저 확인하고, **`/readyz`가 1분 안에 200으로 돌아오지 않으면 브릿지**로 간다. *"짧은 5xx는 정상"* 은 Step 2가 라이브가 된 뒤에야 참이다.
+
+     ⚠️ **`redeploy_submitted`는 "제출됨"이지 "복구됨"이 아니다.** 롤아웃이 실패해 서킷브레이커가 롤백하면 marker가 남아 **같은 회전에 대한 자동 재시도가 없다** — 그때는 사람이 복구한다.
   3. **둘 다 200인데 알람이 지속** → 오탐 후보. 최초 발행 레이스(위)이거나, `/readyz` 응답이 Route53의 **2초 제한**에 걸린 경우다. 후자는 외부에서 `curl -w '%{time_connect} %{time_starttransfer}'`로 `/readyz`를 여러 번 재어 **`time_starttransfer - time_connect`** 가 2초에 얼마나 가까운지 확인한다(운영자 위치 지연이라 참고값).
 - **역할 분리(MTTD) — 장애 종류에 따라 1순위가 다르다**:
   - **전면 다운**(프로세스·태스크가 없음): `alb-elb-5xx`(canary 트래픽 기반 실측 3분37초·4분54초)=빠른 1차, `canary_down`(≈flip 90s + 알람 3분, 실측 5분47초)=결정론적 백스톱. 확인 순서는 여전히 **§2 우선**.
