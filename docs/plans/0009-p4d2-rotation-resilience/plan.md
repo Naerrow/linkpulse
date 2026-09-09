@@ -1,6 +1,6 @@
 ---
 status: in-review
-revision: 22
+revision: 23
 created: 2026-08-24
 ---
 
@@ -617,17 +617,35 @@ DynamoDB·SQS·**알람 7개**. revision 16까지는 *"다섯 리소스는 이�
   상태였다. 1초가 맞으면 행 3의 20초 예산에 근거가 없고, **2초가 맞으면 행 1·4의 최악이 6초라 예산 5초를
   넘어** — 그러면 단계 deadline이 **정상적인 스로틀 재시도 한 번을 잘라낸다.** `PutItem` 쪽이 특히 나쁘다:
   `UpdateService`는 이미 200을 받았으므로 (f) 경로를 타 **중복 재배포 + `Errors` 알람**으로 승격된다).
-  → **2초로 통일하고 행 1·4의 예산을 6초로 올린 뒤, 여유를 15 → 13초로 줄여 합계 105초를 유지한다.**
+  → ~~2초로 통일하고 행 1·4의 예산을 6초로 올린 뒤, 여유를 15 → 13초로 줄여 합계 105초를 유지한다.~~
+  **⬆️ r9의 결론이고 revision 23에서 대체됐다 — 아래 ⛔ 참조(예산 6은 게이트가 항상 닫히는 값이다).**
+
+  ⛔ **revision 22까지 이 표의 행 1·4가 `예산 = 최악`(둘 다 6초)이었고, 그것이 구현에서
+  [높음] 결함이 됐다**(코드 교차 검토 round-1 codex-cli#1 / claude-ide#1, 2인 독립 재현).
+  **단발 구간은 진입 게이트가 `deadline = monotonic() + 예산`을 잡은 **바로 다음 문장**에서
+  시계를 다시 읽으므로, `단계 잔여 = 예산 - ε`가 되어 `예산 == 최악`이면 `잔여 < 최악`이
+  **항상 참**이다.** 정상 이벤트도 AWS 호출 전에 `failed_deadline`으로 끝나 **재배포가 0회**가 된다.
+  실시계 시행에서 **10회 중 10회 차단**됐고, 정지 시계 fake가 단위 테스트 19개 전부에서 이를 가렸다.
+  → **행 1·4의 예산을 8초로 올리고 여유를 13 → 9초로 줄여 합계 105초를 유지한다.**
+  **8은 새 숫자가 아니라 행 3(`UpdateService`)이 이미 쓰던 `예산 = 최악 + 2` 패턴으로 되돌린 값**이고,
+  그러면 단발 세 구간의 여유가 2초로 균일해진다. 수정 후 실시계 시행 **2,000회 차단 0회**로 확인했다.
+
+  ⚠️ **불변식은 `예산 > 최악`이다.** 이 표의 어떤 행도 둘을 같게 두지 않는다.
 
   | # | 구간 | boto3 `Config` | 최악 실행시간 | 예산 |
   | --- | --- | --- | --- | --- |
-  | 1 | `GetItem`(`ConsistentRead=true`) — 앞쪽 읽기 | connect 1 / read 1 / attempts 2 | 1+1 **+backoff 2** +1+1 = 6 | ≤ 6초 |
+  | 1 | `GetItem`(`ConsistentRead=true`) — 앞쪽 읽기 | connect 1 / read 1 / attempts 2 | 1+1 **+backoff 2** +1+1 = 6 | **≤ 8초** |
   | 2 | 라벨 확인 bounded wait (`DescribeSecret` 폴링) | connect 1 / read 3 / attempts 1, 호출 간 sleep 5초 | **단계 monotonic deadline으로 강제** | **≤ 60초** |
   | 3 | `UpdateService` | connect 2 / read 6 / attempts 2 | 2+6 **+backoff 2** +2+6 = 18 | **≤ 20초** |
-  | 4 | `PutItem` 조건부 쓰기 — 뒤쪽 쓰기 | connect 1 / read 1 / attempts 2 | 6 | ≤ 6초 |
-  | 5 | SDK 지터·최종 로그/반환 여유 | — | — | ≤ 13초 |
+  | 4 | `PutItem` 조건부 쓰기 — 뒤쪽 쓰기 | connect 1 / read 1 / attempts 2 | 6 | **≤ 8초** |
+  | 5 | SDK 지터·최종 로그/반환 여유 | — | — | ≤ 9초 |
   | | **합계 = handler 내부 deadline** | | | **105초** |
   | | **함수 `timeout`** | | | **120초** (내부 deadline보다 15초 크게) |
+
+  ℹ️ **합계 105는 장부 숫자다** — 각 단계가 `_monotonic() + BUDGET`으로 deadline을 새로 잡으므로
+  105초짜리 전역 deadline은 코드에 존재하지 않는다. 실제 강제 장치는 `RESERVE_SECONDS`(함수 잔여)와
+  단계별 deadline 둘이다. 그리고 **단발 구간에서 `stage` 항은 `예산 > 최악`인 한 바인딩되지 않는다** —
+  그 셋을 지키는 것은 `function` 항 하나이고, `stage` 항이 실제로 도는 곳은 라벨 확인 폴링 루프다.
 
   ⚠️ **botocore의 backoff 상한은 `Config`로 직접 지정할 수 없다** — 위 2초는 *"`total_max_attempts = 2`이면
   재시도가 1회뿐이고 그 지연이 지수 backoff의 가장 작은 구간"*이라는 **가정**이다. 따라서
@@ -664,6 +682,12 @@ DynamoDB·SQS·**알람 7개**. revision 16까지는 *"다섯 리소스는 이�
   | `redeploy_submitted_raced_marker` | 재배포는 제출했으나 marker 경합에서 졌다 — **허용된 중복 재배포**(동시 miss) | 호출함(200) | 다른 호출이 씀 |
   | `skipped_duplicate` | 선행 `GetItem` 적중 — **재배포를 부르지 않았다** | 호출 안 함 | 이미 있음 |
   | `failed_<지점>` | 실패 — `failed_getitem` / `failed_label_wait` / `failed_update_service` / `failed_putitem` / `failed_deadline` | 지점에 따라 다름 | 없음 |
+  | `failed_validation` | **환경변수 fail-fast 또는 이벤트 대조 실패** — 모든 AWS 호출보다 앞에서 끝난다 | 호출 안 함 | 없음 |
+
+  ⚠️ **`failed_validation`은 revision 23에서 추가됐다**(구현 중 발견 — 이 plan이 환경변수 fail-fast와
+  이벤트 `resources` 대조를 둘 다 요구하면서 그 실패의 이름을 주지 않아, 구현자가 임의로 붙이면
+  1-7의 사후 증거가 표와 어긋난다). 이 값이 나오면 **회전과 무관한 설정·이벤트 문제**이고
+  재배포는 시도되지 않았다. `error` 필드가 환경변수 누락인지 다른 시크릿 이벤트인지 구분한다.
 
   ⚠️ `redeploy_submitted*`는 **rollout 성공을 뜻하지 않는다**(위 marker 의미 절). *"재배포가 실제로
   성공했는가"*는 이 로그가 아니라 ECS deployment 상태·기존 알람·canary가 답한다.
@@ -829,7 +853,12 @@ DynamoDB·SQS·**알람 7개**. revision 16까지는 *"다섯 리소스는 이�
    **execution role 정책에 `dynamodb:GetItem`이 들어 있는지**(r7 claude-ide#1 — 빠지면 첫 중복
    이벤트가 `AccessDenied`로 끝나는데, 그때까지 아무 증상도 없다) **그리고 `ecs:DescribeServices`가
    들어 있지 않은지**(handler가 호출하지 않으므로 최소권한),
-   `describe-log-groups`·`describe-resource-policies`로 광역 rule의 Logs 권한 확인.
+   `describe-log-groups`·`describe-resource-policies`로 광역 rule의 Logs 권한 확인 —
+   **principal 둘·action 둘·resource(stream 범위 `:*`)에 더해 condition 2개
+   (`StringEquals aws:SourceAccount`·`ArnEquals aws:SourceArn` = 광역 rule ARN)까지 값을 단언한다**
+   (revision 23 추가. 코드 교차 검토 round-1 codex-ide#2 — AWS의 ECS lifecycle events 예제가
+   **같은 두 principal에 두 조건을 함께** 걸므로, 조건 없이 두면 로그 그룹 ARN 한정만으로는
+   *"누구를 대신해 호출하는가"*가 묶이지 않는다. 그 근거로 코드에 조건을 넣었으므로 검증도 따라간다).
 
 **1-4. [사람] Lambda 직접 호출로 동작을 검증한다**
 `put-events`로는 운영 rule을 종단 검증할 수 없다 — 고객 이벤트의 `source`는 `aws.`로 시작할 수 없다.
@@ -2001,6 +2030,38 @@ r19 codex-cli#2로 이 ADR 항목까지 전파했다), 2계층 실패 보존, **
 ## 검토 반영 로그
 
 <!-- /plan-merge가 라운드별로 기록. 형식: [rN] 리뷰어#번호 지적요약 → 반영|기각 — 사유 -->
+
+### revision 23 (2026-09-09) — 구현·실측이 plan을 정정한다
+
+⚠️ **이 revision은 plan 리뷰 라운드가 아니라 `code-review/round-1·2`와 1-3·1-6 실측에서 왔다.**
+plan이 코드를 고치는 방향이 아니라 **코드가 plan의 사실 오류를 드러낸 방향**이다.
+
+| # | 정정 | 출처 | 파급 대상(sweep 목록) |
+| --- | --- | --- | --- |
+| 1 | **실행 예산표 행 1·4를 `예산 6 → 8`, 여유 `13 → 9`**(합계 105 유지) | code-review r1 codex-cli#1 / claude-ide#1 [높음] | 예산표 · `timeout = 120` 근거 문장 · 리스크표의 SDK 재시도 행 |
+| 2 | **`outcome` 표에 `failed_validation` 추가** | 구현 중 발견(r1 claude-ide 개선으로 지적) | `outcome` 표 · 1-7 사후 증거 절 |
+| 3 | **1-3 검증의 `describe-resource-policies`에 condition 2개 단언 추가** | code-review r1 codex-ide#2 [중간] | 1-3 검증 목록 · 1-1 광역 rule 계약 |
+
+⛔ **#1이 가장 중요하다 — plan 쪽 숫자가 먼저 깨져 있었다.**
+`예산 = 최악`(둘 다 6초)은 단발 구간에서 **진입 게이트가 구조적으로 항상 닫히는** 값이다.
+`deadline = monotonic() + 예산`을 잡은 다음 문장에서 시계를 다시 읽으면 `잔여 = 예산 - ε`이므로
+`잔여 < 최악`이 항상 참이 된다. 구현자가 이 표를 충실히 옮긴 결과 **정상 이벤트도 AWS 호출 전에
+`failed_deadline`으로 끝나 재배포가 0회**가 됐고, 정지 시계 fake가 단위 테스트 19개 전부에서 이를 가렸다.
+실시계 재현 10/10 차단 → 수정 후 2,000회 차단 0회.
+**행 3이 이미 `예산 = 최악 + 2`였다** — 행 1·4만 그 패턴에서 이탈해 있었다.
+→ **불변식 `예산 > 최악`을 표 위에 명시했다.**
+
+ℹ️ **함께 적어 둔 것**: 합계 105는 **장부 숫자**이고 코드가 강제하는 전역 deadline은 없다
+(강제 장치는 `RESERVE_SECONDS`와 단계별 deadline). 단발 구간에서 `stage` 항은 `예산 > 최악`인 한
+바인딩되지 않는다 — 다음 사람이 여유 행을 더 깎거나 *"단계 게이트가 GetItem/PutItem을 지켜 준다"*고
+읽는 것을 막는다.
+
+✅ **Step 1은 이 revision 시점에 1-1~1-6 완료·라이브다**(1-6 드릴 2026-09-09: 회전 → 재배포 제출
+1분 15초, 롤아웃 완료 **4분 10초**, 사람 개입 0). 이벤트 계약도 실이벤트로 확인됐다 —
+`detail.labelUpdated`는 **본문 문자열**(패턴은 배열), `detail.versionId`는 라벨을 얻은 새 버전,
+**회전 1회 = 매칭 이벤트 1건**. 광역 rule 로그와 Lambda 로그의 `event_id`가 일치해
+**rule → Lambda 배선까지 증명**됐다. → `1-1a` 절이 (a) 채택의 대가로 남겨 둔
+*"전제 검증이 라이브 전환 뒤로 간다"*는 **해소됐다.**
 
 **[r21] revision 21 → 22** (3인 전원 제출, 전부 `reviewed-revision: 21`, 전부 `request-changes`.
 **반영 17 · 기각 0**. ⚠️ **결함 11건 중 8건이 "09-07 (ii) 수행"이라는 사실 하나의 파급**이고,
