@@ -37,9 +37,26 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
   policy = data.aws_iam_policy_document.ecs_execution_secrets.json
 }
 
-# 태스크 역할(task role): 앱이 런타임에 호출하는 AWS API용. 현재 앱은 AWS SDK를
-# 쓰지 않으므로 권한 없는 빈 역할이다(향후 필요 시 정책을 붙인다).
+# 태스크 역할(task role): 앱이 런타임에 호출하는 AWS API용.
 resource "aws_iam_role" "ecs_task" {
   name               = "${local.name_prefix}-ecs-task"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+}
+
+# P4(d)-2 Step 2: 앱이 회전 후 현재 비밀번호를 런타임에 다시 읽는다(plan 0009 2-2).
+# execution role의 기존 권한은 그대로 둔다 — 기동 시 주입(seed)은 계속 쓰고,
+# 그 값이 그 시점의 AWSCURRENT라 정상 기동에 유효하다(2-3 (a)).
+# 여기서 주는 것은 "실행 중에 다시 읽을" 권한이고 대상 시크릿 ARN 하나로 한정한다.
+data "aws_iam_policy_document" "ecs_task_secrets" {
+  statement {
+    sid       = "ReadDBPasswordAtRuntime"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [local.rotation_secret_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_task_secrets" {
+  name   = "read-db-secret-runtime"
+  role   = aws_iam_role.ecs_task.id
+  policy = data.aws_iam_policy_document.ecs_task_secrets.json
 }
