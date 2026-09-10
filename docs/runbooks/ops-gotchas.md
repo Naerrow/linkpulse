@@ -111,3 +111,36 @@ Terraform이 "설정에서 사라졌다 = 지워라"로 읽는다.
 
 **재발 방지** — 검증 스크립트가 "전부 불합격"을 내면 대상을 의심하기 전에 **쿼리 필드명부터 확인한다.**
 조용히 `null`이 되는 API 필드는 검증을 통째로 무의미하게 만든다.
+
+---
+
+## G-6. `git rev-parse --short`는 리비전을 하나만 받는다
+
+**증상** — 두 SHA를 한 번에 비교하려다 아무것도 못 얻는다.
+```
+$ git rev-parse --short HEAD origin/main
+fatal: Needed a single revision
+```
+`--short=7`로 길이를 명시해도 같다. 각각 따로 부르면 정상이다.
+
+**원인** — `--short`는 단일 리비전 출력 전용이다. 인자가 둘이면 개수 검사에서 먼저 실패한다.
+
+**해결**
+```bash
+git rev-parse --short HEAD; git rev-parse --short origin/main   # 따로
+git rev-parse HEAD origin/main                                   # 또는 --short 없이(전체 SHA)
+```
+
+**⚠️ 위험한 점 — 검증이 조용히 무의미해진다.** 이 명령을 `echo`나 파이프라인 안에 넣어 두면
+에러가 stderr로 빠지고 **본문은 빈 줄로 보인다.** 실제로 2026-09-09에 *"머지·push가 됐는지"*
+확인하던 두 번이 이렇게 빈 출력을 냈고, **PR이 머지 안 된 상태를 "동기화됨"으로 넘길 뻔했다.**
+
+**대신 쓸 것** — 브랜치 동기 상태는 이게 낫다.
+```bash
+git status -sb | head -1
+#  ## main...origin/main            <- ahead/behind 표시 없으면 동기화됨
+#  ## main...origin/main [ahead 1]  <- push 안 됨
+```
+
+**교훈(G-5와 같다)** — 검증 명령 자체가 틀리면 검증은 통과처럼 보인다.
+**빈 출력을 "이상 없음"으로 읽지 않는다.** 기대한 값이 나왔는지를 본다.
