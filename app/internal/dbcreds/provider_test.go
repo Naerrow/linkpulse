@@ -531,3 +531,57 @@ func TestLogsNeverContainPassword(t *testing.T) {
 		}
 	}
 }
+
+// ---- 2-3 폴백 계약: 두 경우는 결과가 다르다 ----
+
+// (a) 기동 시 SDK 장애 — ECS가 주입한 seed는 그 시점의 AWSCURRENT라 유효하다.
+// SDK가 죽어 있어도 정상 기동·정상 연결이어야 하고, 애초에 조회하지도 않는다.
+func TestFallbackSeedWorksWhenSDKIsDown(t *testing.T) {
+	f := &fakeFetch{err: errors.New("SDK 장애")}
+	p, c, d, cap := newTestSetup(t, f.fn)
+	d.setAccepts(oldPassword) // seed가 아직 유효하다(회전 전)
+
+	if _, err := c.Connect(context.Background()); err != nil {
+		t.Fatalf("seed로 정상 연결돼야 한다: %v", err)
+	}
+	if f.count() != 0 {
+		t.Errorf("SDK 호출 %d회 — 28P01이 없으면 조회하지 않는다", f.count())
+	}
+	if cap.countEvent("auth_failed_observed") != 0 {
+		t.Error("인증 실패가 없었는데 T_fail 로그가 났다")
+	}
+	if p.Current().Generation != 1 {
+		t.Error("seed 세대가 유지돼야 한다")
+	}
+}
+
+// (b) 회전 후 refresh 장애 — 실행 중 태스크의 env는 이미 옛 비밀번호다.
+// 폴백으로 복구되지 않고 장애가 지속된다. 그 사실이 구조화 로그로 드러나야 한다
+// (이 구간의 복구는 Step 1의 자동 재배포가 맡는다).
+func TestFallbackCannotRecoverAfterRotationWhenSDKIsDown(t *testing.T) {
+	clock := newFakeClock()
+	f := &fakeFetch{err: errors.New("SDK 장애")}
+	p, c, _, cap := newTestSetup(t, f.fn, WithClock(clock.now), WithJitter(func(x float64) float64 { return x }))
+
+	// DB는 이미 새 비밀번호이고(fakeDial 기본값), seed는 옛 값이다 = 회전 직후.
+	for i := 0; i < 3; i++ {
+		if _, err := c.Connect(context.Background()); err == nil {
+			t.Fatal("SDK가 죽어 있으면 회복할 수 없다 — 폴백은 복구 수단이 아니다")
+		}
+		clock.advance(maxBackoff)
+	}
+	if p.Current().Generation != 1 {
+		t.Error("조회가 실패했으므로 세대는 그대로여야 한다")
+	}
+	// 장애가 조용히 지나가지 않는다.
+	if cap.countEvent("auth_failed_observed") != 1 {
+		t.Errorf("auth_failed_observed %d회 — 세대당 1회 남아야 한다", cap.countEvent("auth_failed_observed"))
+	}
+	if cap.countEvent("credential_recovered") != 0 {
+		t.Error("회복하지 않았는데 credential_recovered가 났다")
+	}
+	// 그리고 계속 시도한다(provider 수준 포기 없음) — Step 1이 재배포할 때까지.
+	if f.count() < 3 {
+		t.Errorf("SDK 조회 %d회 — 게이트가 열릴 때마다 다시 시도해야 한다", f.count())
+	}
+}
