@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Naerrow/linkpulse/app/internal/config"
 	"github.com/Naerrow/linkpulse/app/internal/db"
+	"github.com/Naerrow/linkpulse/app/internal/dbcreds"
 	"github.com/Naerrow/linkpulse/app/internal/httpapi"
 	"github.com/Naerrow/linkpulse/app/internal/links"
 )
@@ -44,14 +46,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLogger(cfg.LogLevel)
+	// task_id를 모든 구조화 로그에 고정 첨부한다. 2-6이 "회전 전에 기록한 task ID 집합"으로
+	// 판정하므로 이 필드가 없으면 판정이 불가능하다. 실패하면 unknown으로 두고 기동은 계속한다.
+	setupLogger(cfg.LogLevel, dbcreds.TaskID(context.Background()))
 
 	// 저장소 → 서비스 → 라우터 순으로 의존성을 조립한다.
 	// DATABASE_URL이 있으면 Postgres를, 없으면 인메모리(재시작 시 데이터 소실)를 쓴다.
 	var repo links.Repository
 	var readiness func(context.Context) error
 	if cfg.DatabaseURL != "" {
-		pool, err := db.Open(context.Background(), cfg.DatabaseURL)
+		// DB_SECRET_ARN이 있으면 회전 대응 provider를 붙인다. 없으면 정적 모드다(로컬).
+		var provider *dbcreds.Provider
+		if cfg.DBSecretARN != "" {
+			fetch, err := dbcreds.NewSecretsManagerFetch(context.Background(), cfg.DBSecretARN)
+			if err != nil {
+				slog.Error("Secrets Manager 설정 실패", "error", err)
+				os.Exit(1)
+			}
+			// seed는 ECS가 주입한 값 — 그 시점의 AWSCURRENT이므로 유효하다(2-3 (a)).
+			provider = dbcreds.New(cfg.DBPassword, fetch)
+			// 풀보다 뒤에 닫히도록 여기서 defer한다(LIFO) — 진행 중 refresh를 취소한다.
+			defer provider.Close()
+		}
+		logProviderMode(provider, cfg)
+
+		pool, err := db.Open(context.Background(), db.Settings{
+			DSN:             cfg.DatabaseURL,
+			ConnMaxLifetime: cfg.ConnMaxLifetime,
+			Provider:        provider,
+		})
 		if err != nil {
 			slog.Error("DB 초기화 실패", "error", err)
 			os.Exit(1)
@@ -117,8 +140,40 @@ func newServer(cfg config.Config, handler http.Handler) *http.Server {
 	}
 }
 
-// setupLogger는 LOG_LEVEL에 맞춰 JSON 구조화 로거를 전역 기본 로거로 설정한다.
-func setupLogger(level string) {
+// logProviderMode는 기동 시 provider 모드와 커넥션 수명을 한 줄로 남긴다.
+//
+// 2-5 smoke가 이 줄로 "Step 2 코드가 실제로 도는 이미지인지"를 확인한다 — task definition의
+// env 확인만으로는 이미지 내용을 보지 못한다. conn_max_lifetime을 같은 줄에 넣는 이유는
+// 잘못된 값이 기동 실패가 아니라 폴백 + 경고라, 문자열 확인만으로는 실효값을 증명하지 못해서다.
+func logProviderMode(p *dbcreds.Provider, cfg config.Config) {
+	mode := "static"
+	if p != nil {
+		mode = p.Mode()
+	}
+	attrs := []any{
+		"event", "startup",
+		"secret_provider_mode", mode,
+		"conn_max_lifetime", cfg.ConnMaxLifetime.String(),
+	}
+	if mode == "secret" {
+		// ARN 자체가 아니라 시크릿 이름만 남긴다(계정 ID를 로그에 흘리지 않는다).
+		attrs = append(attrs, "secret_name", secretNameFromARN(cfg.DBSecretARN))
+	}
+	slog.Info("DB 자격증명 provider 준비", attrs...)
+}
+
+// secretNameFromARN은 ARN의 ":secret:" 뒤 이름만 뽑는다. 형식이 아니면 빈 값이다.
+func secretNameFromARN(arn string) string {
+	const marker = ":secret:"
+	if i := strings.Index(arn, marker); i >= 0 {
+		return arn[i+len(marker):]
+	}
+	return ""
+}
+
+// setupLogger는 LOG_LEVEL에 맞춰 JSON 구조화 로거를 전역 기본 로거로 설정하고,
+// 모든 로그에 task_id를 붙인다.
+func setupLogger(level string, taskID string) {
 	var lvl slog.Level
 	switch level {
 	case "debug":
@@ -131,5 +186,5 @@ func setupLogger(level string) {
 		lvl = slog.LevelInfo
 	}
 	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
-	slog.SetDefault(slog.New(handler))
+	slog.SetDefault(slog.New(handler).With("task_id", taskID))
 }

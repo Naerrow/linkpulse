@@ -5,11 +5,15 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/Naerrow/linkpulse/app/internal/dbcreds"
 )
 
 const (
@@ -18,6 +22,10 @@ const (
 	// 아래는 명백히 잘못된 설정을 막는 하한/상한이다.
 	minShortCodeLength = 4
 	maxShortCodeLength = 32
+
+	// 커넥션 최대 수명 기본값. 지금까지 db.go에 상수로 박혀 있던 값과 같다 —
+	// 환경변수를 안 넣으면 동작이 그대로다.
+	defaultConnMaxLifetime = 5 * time.Minute
 )
 
 // Config는 실행에 필요한 설정값 모음이다.
@@ -32,6 +40,18 @@ type Config struct {
 	// Postgres 접속 문자열. DATABASE_URL이 있으면 그 값을, 없으면 DB_* 개별 변수로
 	// 조립한 값을 담는다. 비어 있으면 인메모리 저장소를 사용한다. (resolveDatabaseURL 참고)
 	DatabaseURL string
+	// 기동 시 주입된 비밀번호. 회전 대응 provider의 seed로만 쓴다(2-3 (a): ECS가 넣어 준
+	// 값은 그 시점의 AWSCURRENT이므로 유효하다). DATABASE_URL 경로에서는 비어 있다.
+	DBPassword string
+	// 회전 대응에 쓸 시크릿 ARN (DB_SECRET_ARN). 비어 있으면 정적 모드다.
+	// 비밀이 아니라 식별자다.
+	DBSecretARN string
+	// 배포 시점 교차검사용 리전 (AWS_REGION). SDK 리전의 source of truth가 아니다 —
+	// 그것은 DBSecretARN 파싱값이다.
+	AWSRegion string
+	// 커넥션 최대 수명 (DB_CONN_MAX_LIFETIME). 2-6 검증 기간에만 짧게 넣어
+	// 신규 연결을 강제하고, 평시에는 미설정(기본 5분)이다.
+	ConnMaxLifetime time.Duration
 }
 
 // 인식되는 APP_ENV 값. 그 외(예: "prod" 오타)는 fail-fast로 막아
@@ -61,7 +81,7 @@ func Load() (Config, error) {
 	}
 
 	// DB 접속 문자열을 해석한다(DATABASE_URL 우선, 없으면 DB_* 조립).
-	dsn, err := resolveDatabaseURL()
+	dsn, dbPassword, err := resolveDatabaseURL()
 	if err != nil {
 		return Config{}, err
 	}
@@ -80,6 +100,15 @@ func Load() (Config, error) {
 		return Config{}, errors.New("APP_ENV=production인데 DATABASE_URL/DB_*가 미설정입니다 — 인메모리 폴백 금지")
 	}
 
+	// 회전 대응 설정. 같은 자리·같은 형태의 fail-fast다.
+	secretARN := os.Getenv("DB_SECRET_ARN")
+	awsRegion := os.Getenv("AWS_REGION")
+	if err := validateRotationEnv(appEnv, secretARN, awsRegion); err != nil {
+		return Config{}, err
+	}
+
+	connMaxLifetime := resolveConnMaxLifetime()
+
 	return Config{
 		Port:            getEnv("APP_PORT", "8080"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
@@ -87,8 +116,61 @@ func Load() (Config, error) {
 		ShortCodeLength: codeLen,
 		AppEnv:          appEnv,
 		// 비어 있으면 main에서 인메모리 저장소로 폴백한다(로컬 개발 편의).
-		DatabaseURL: dsn,
+		DatabaseURL:     dsn,
+		DBPassword:      dbPassword,
+		DBSecretARN:     secretARN,
+		AWSRegion:       awsRegion,
+		ConnMaxLifetime: connMaxLifetime,
 	}, nil
+}
+
+// validateRotationEnv는 회전 대응 설정의 production 계약을 강제한다.
+//
+// 왜 fail-fast인가: 이 검사가 없으면 apply 순서 실수·잘못된 task definition base·env 유실이
+// 있어도 새 앱이 **구 비밀번호로 정상 기동**하고 /readyz 200·왕복 302 smoke까지 통과한다 —
+// 즉 Step 2가 배포되지 않았는데 배포된 것처럼 보이고, 다음 회전 때까지 드러나지 않는다.
+//
+// AWS_REGION은 SDK를 동작시키는 값이 아니다(SDK 리전은 ARN 파싱에서 온다). 목적은
+// "task definition이 의도한 리전으로 만들어졌는지"를 배포 시점에 거르는 이중 방어이고,
+// 그 목적을 살리려면 production에서 빈 값은 "검사 생략"이 아니라 오류여야 한다.
+func validateRotationEnv(appEnv, secretARN, awsRegion string) error {
+	if appEnv != envProduction {
+		// 로컬·개발은 정적 모드라 SDK를 쓰지 않는다.
+		return nil
+	}
+	if secretARN == "" {
+		return errors.New("APP_ENV=production인데 DB_SECRET_ARN이 미설정입니다 — 회전 대응 없이 기동 금지")
+	}
+	if awsRegion == "" {
+		return errors.New("APP_ENV=production인데 AWS_REGION이 미설정입니다 — 배포 시점 교차검사 불가")
+	}
+	arnRegion, err := dbcreds.RegionFromSecretARN(secretARN)
+	if err != nil {
+		return fmt.Errorf("DB_SECRET_ARN이 올바르지 않습니다: %w", err)
+	}
+	if arnRegion != awsRegion {
+		return fmt.Errorf("DB_SECRET_ARN의 리전(%s)과 AWS_REGION(%s)이 다릅니다", arnRegion, awsRegion)
+	}
+	return nil
+}
+
+// resolveConnMaxLifetime은 DB_CONN_MAX_LIFETIME을 읽는다.
+//
+// 이 값은 안전이 아니라 검증 편의(2-6이 T_fail을 설계로 만드는 손잡이)라, 잘못된 값에도
+// 기동을 막지 않고 기본값으로 떨어뜨린 뒤 경고만 남긴다. 실효값은 기동 로그로 확인한다 —
+// 폴백이 있으므로 task definition 문자열만으로는 실효값을 증명하지 못한다.
+func resolveConnMaxLifetime() time.Duration {
+	raw := os.Getenv("DB_CONN_MAX_LIFETIME")
+	if raw == "" {
+		return defaultConnMaxLifetime
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		slog.Warn("DB_CONN_MAX_LIFETIME이 올바르지 않아 기본값을 씁니다",
+			"value", raw, "fallback", defaultConnMaxLifetime.String())
+		return defaultConnMaxLifetime
+	}
+	return d
 }
 
 // validatePublicBaseURL은 공개 주소가 절대 http/https URL인지 검증한다.
@@ -122,19 +204,20 @@ func validatePublicBaseURL(raw string) error {
 // 검사하고, 누락된 키를 명시해 에러를 반환한다 — 운영에서 일부만 주입돼 조용히 인메모리로
 // 떠 데이터가 증발하는 사고를 막는다(fail-fast). DB_PORT/DB_SSLMODE는 기본값(5432/require)이
 // 있는 보조값이라 이 트리거에서 제외한다.
-func resolveDatabaseURL() (string, error) {
-	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
-		return dsn, nil
+func resolveDatabaseURL() (dsn, password string, err error) {
+	if raw := os.Getenv("DATABASE_URL"); raw != "" {
+		// 이 경로는 로컬 docker-compose 전용이라 회전 provider를 쓰지 않는다(정적 모드).
+		return raw, "", nil
 	}
 
 	host := os.Getenv("DB_HOST")
 	user := os.Getenv("DB_USER")
-	password := os.Getenv("DB_PASSWORD")
+	password = os.Getenv("DB_PASSWORD")
 	name := os.Getenv("DB_NAME")
 
 	// 핵심 4개가 전부 비면 DB 미설정으로 보고 인메모리로 폴백한다(로컬 개발 편의).
 	if host == "" && user == "" && password == "" && name == "" {
-		return "", nil
+		return "", "", nil
 	}
 
 	// 하나라도 설정됐으면 전부 필수 — 어떤 키가 빠졌는지 알려 준다(fail-fast).
@@ -152,7 +235,7 @@ func resolveDatabaseURL() (string, error) {
 		missing = append(missing, "DB_NAME")
 	}
 	if len(missing) > 0 {
-		return "", fmt.Errorf("DB 접속 설정이 일부만 지정됐습니다. 누락: %s", strings.Join(missing, ", "))
+		return "", "", fmt.Errorf("DB 접속 설정이 일부만 지정됐습니다. 누락: %s", strings.Join(missing, ", "))
 	}
 
 	port := getEnv("DB_PORT", "5432")
@@ -167,7 +250,7 @@ func resolveDatabaseURL() (string, error) {
 		Path:     "/" + name,
 		RawQuery: url.Values{"sslmode": {sslmode}}.Encode(),
 	}
-	return u.String(), nil
+	return u.String(), password, nil
 }
 
 // getEnv는 환경변수를 읽되, 비어 있으면 기본값을 돌려준다.
