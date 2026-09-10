@@ -9,8 +9,13 @@ resource "aws_ecs_cluster" "main" {
   tags = { Name = "${local.name_prefix}-cluster" }
 }
 
+# skip_destroy: 새 revision을 등록할 때 이전 revision을 INACTIVE로 만들지 않는다.
+# Step 2가 task definition에 env를 추가하면 replacement가 일어나는데, 그때 이전 revision이
+# INACTIVE가 되면 롤백 대상이 사라진다(직전 ACTIVE revision을 다시 가리키는 것이 유일한 백스톱이다 —
+# Step 1의 force-new-deployment는 같은 이미지를 다시 띄울 뿐이라 코드 결함을 되돌리지 못한다).
 resource "aws_ecs_task_definition" "app" {
   family                   = "${local.name_prefix}-app"
+  skip_destroy             = true
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.task_cpu
