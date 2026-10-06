@@ -5,7 +5,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -52,6 +51,10 @@ type Config struct {
 	// 커넥션 최대 수명 (DB_CONN_MAX_LIFETIME). 2-6 검증 기간에만 짧게 넣어
 	// 신규 연결을 강제하고, 평시에는 미설정(기본 5분)이다.
 	ConnMaxLifetime time.Duration
+	// 잘못돼서 무시한 DB_CONN_MAX_LIFETIME 원문. 비어 있으면 정상이다.
+	// 값이 있으면 기동 로그가 그 사실을 함께 남긴다 — 이 경고를 Load 안에서 바로 찍으면
+	// 구조화 로거 설정 전이라 JSON도 task_id도 붙지 않는다.
+	ConnMaxLifetimeRejected string
 }
 
 // 인식되는 APP_ENV 값. 그 외(예: "prod" 오타)는 fail-fast로 막아
@@ -103,11 +106,18 @@ func Load() (Config, error) {
 	// 회전 대응 설정. 같은 자리·같은 형태의 fail-fast다.
 	secretARN := os.Getenv("DB_SECRET_ARN")
 	awsRegion := os.Getenv("AWS_REGION")
+	// DATABASE_URL 경로는 정적 모드 전용이다(로컬 docker-compose). 시크릿 ARN과 함께 두면
+	// provider가 **빈 비밀번호를 seed로** 받아 — DSN에서 쓰는 값은 resolveDatabaseURL이
+	// 돌려주지 않는다 — 첫 연결부터 refresh에 의존하고, SDK가 죽으면 DSN에 유효한 값이
+	// 있어도 기동하지 못한다. 2-3 (a)의 "seed로 정상 기동"이 깨지므로 조합 자체를 막는다.
+	if os.Getenv("DATABASE_URL") != "" && secretARN != "" {
+		return Config{}, errors.New("DATABASE_URL과 DB_SECRET_ARN은 함께 쓸 수 없습니다 — 회전 대응은 DB_* 경로를 씁니다")
+	}
 	if err := validateRotationEnv(appEnv, secretARN, awsRegion); err != nil {
 		return Config{}, err
 	}
 
-	connMaxLifetime := resolveConnMaxLifetime()
+	connMaxLifetime, rejectedLifetime := resolveConnMaxLifetime()
 
 	return Config{
 		Port:            getEnv("APP_PORT", "8080"),
@@ -116,11 +126,12 @@ func Load() (Config, error) {
 		ShortCodeLength: codeLen,
 		AppEnv:          appEnv,
 		// 비어 있으면 main에서 인메모리 저장소로 폴백한다(로컬 개발 편의).
-		DatabaseURL:     dsn,
-		DBPassword:      dbPassword,
-		DBSecretARN:     secretARN,
-		AWSRegion:       awsRegion,
-		ConnMaxLifetime: connMaxLifetime,
+		DatabaseURL:             dsn,
+		DBPassword:              dbPassword,
+		DBSecretARN:             secretARN,
+		AWSRegion:               awsRegion,
+		ConnMaxLifetime:         connMaxLifetime,
+		ConnMaxLifetimeRejected: rejectedLifetime,
 	}, nil
 }
 
@@ -157,20 +168,22 @@ func validateRotationEnv(appEnv, secretARN, awsRegion string) error {
 // resolveConnMaxLifetime은 DB_CONN_MAX_LIFETIME을 읽는다.
 //
 // 이 값은 안전이 아니라 검증 편의(2-6이 T_fail을 설계로 만드는 손잡이)라, 잘못된 값에도
-// 기동을 막지 않고 기본값으로 떨어뜨린 뒤 경고만 남긴다. 실효값은 기동 로그로 확인한다 —
+// 기동을 막지 않고 기본값으로 떨어뜨린다. 실효값은 기동 로그로 확인한다 —
 // 폴백이 있으므로 task definition 문자열만으로는 실효값을 증명하지 못한다.
-func resolveConnMaxLifetime() time.Duration {
+//
+// 거부한 원문은 **여기서 찍지 않고 돌려준다.** Load는 구조화 로거 설정보다 먼저 돌기 때문에
+// 여기서 경고하면 그 줄만 text 핸들러로 stderr에 나가 JSON도 task_id도 붙지 않는다 —
+// 하필 이 줄이 "지정한 값이 무시됐다"는 유일한 신호다.
+func resolveConnMaxLifetime() (d time.Duration, rejected string) {
 	raw := os.Getenv("DB_CONN_MAX_LIFETIME")
 	if raw == "" {
-		return defaultConnMaxLifetime
+		return defaultConnMaxLifetime, ""
 	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d <= 0 {
-		slog.Warn("DB_CONN_MAX_LIFETIME이 올바르지 않아 기본값을 씁니다",
-			"value", raw, "fallback", defaultConnMaxLifetime.String())
-		return defaultConnMaxLifetime
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return defaultConnMaxLifetime, raw
 	}
-	return d
+	return parsed, ""
 }
 
 // validatePublicBaseURL은 공개 주소가 절대 http/https URL인지 검증한다.

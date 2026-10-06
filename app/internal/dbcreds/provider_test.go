@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"strings"
@@ -22,9 +23,21 @@ const (
 	newPassword = "new-secret-value"
 )
 
-// authErr는 실제 pgx가 인증 실패에서 돌려주는 형태다. 분류기를 진짜로 시험하기 위해
-// 가짜 sentinel 대신 *pgconn.PgError를 쓴다.
+// authErr는 pgx가 **실제로** 돌려주는 형태다 — 맨 *pgconn.PgError가 아니라
+// ConnectError → errors.Join(다중 호스트) → "server error: %w" 의 다단 래핑이다
+// (pgconn/errors.go:62-95, pgconn/pgconn.go:163,325,535).
+// 맨 오류만 쓰면 분류기가 아니라 비교문 한 줄을 시험하게 되고, pgx 업그레이드 한 번에
+// Step 2의 진입 조건이 조용히 깨진다(round-1 claude-ide#3).
 func authErr() error {
+	return fmt.Errorf("failed to connect to `host=db user=app database=linkpulse`: %w",
+		errors.Join(
+			errors.New("dial tcp 10.0.0.9:5432: connect: connection refused"),
+			fmt.Errorf("server error: %w", bareAuthErr()),
+		))
+}
+
+// bareAuthErr는 래핑 없는 28P01이다. 분류기가 두 형태 모두를 받는지 가른다.
+func bareAuthErr() *pgconn.PgError {
 	return &pgconn.PgError{Code: authFailedSQLState, Message: "password authentication failed"}
 }
 
@@ -38,14 +51,24 @@ type fakeDial struct {
 	delay    time.Duration
 	failAll  bool // refresh는 성공했는데 새 세대 dial이 실패하는 경로 (검증 ⑫)
 	netErr   bool
+	blockOn  string        // 이 비밀번호로 들어온 dial을 block이 닫힐 때까지 붙잡는다
+	block    chan struct{} // 늦게 끝나는 옛 세대 dial을 결정적으로 만들기 위한 손잡이
 }
 
 func (f *fakeDial) fn(ctx context.Context, password string) (driver.Conn, error) {
 	f.mu.Lock()
 	f.attempts = append(f.attempts, password)
 	delay, accepts, failAll, netErr := f.delay, f.accepts, f.failAll, f.netErr
+	blockOn, block := f.blockOn, f.block
 	f.mu.Unlock()
 
+	if block != nil && password == blockOn {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if delay > 0 {
 		select {
 		case <-time.After(delay):
@@ -72,6 +95,28 @@ func (f *fakeDial) setAccepts(p string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.accepts = p
+}
+
+// blockDial은 특정 비밀번호의 dial을 release가 닫힐 때까지 붙잡는다.
+func (f *fakeDial) blockDial(password string, release chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blockOn, f.block = password, release
+}
+
+// waitForAttempt는 그 비밀번호로 dial이 시작될 때까지 기다린다(순서 제어용).
+func (f *fakeDial) waitForAttempt(t *testing.T, password string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, got := range f.passwords() {
+			if got == password {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("%q로 dial이 시도되지 않았다", password)
 }
 
 // fakeFetch는 호출 횟수를 세고 지정된 값을 돌려준다.
@@ -272,26 +317,109 @@ func TestNetworkErrorDoesNotRefresh(t *testing.T) {
 	}
 }
 
-// ⑤ 늦게 도착한 옛 세대의 28P01이 이미 갱신된 세대를 되돌리지 않는다.
-func TestStaleFailureDoesNotRegressGeneration(t *testing.T) {
+// ⑤ 늦게 도착한 옛 세대의 28P01은 재조회를 아예 시작하지 않는다.
+//
+// 세대가 이미 전진했다면 조회로 얻을 것은 없고 위험만 있다 — 비단조적 응답이 옛 값을
+// 새 세대로 올려 복구를 되돌리거나, 값 동일 판정이 게이트를 닫아 바로 뒤의 정상 refresh를
+// 늦춘다(round-1 codex-cli#1 / codex-ide#1).
+func TestStaleGenerationFailureDoesNotRefetch(t *testing.T) {
 	f := &fakeFetch{value: newPassword}
-	p, c, d, _ := newTestSetup(t, f.fn)
+	p, c, _, _ := newTestSetup(t, f.fn)
 
 	if _, err := c.Connect(context.Background()); err != nil {
 		t.Fatalf("첫 회복 실패: %v", err)
 	}
-	gen := p.Current().Generation
+	if got := p.Current().Generation; got != 2 {
+		t.Fatalf("세대 %d — 회복했으면 2여야 한다", got)
+	}
 
-	// 옛 값만 받는 DB로 되돌려 28P01을 다시 만든다(늦게 도착한 옛 실패를 모사).
-	d.setAccepts("something-else")
-	f.set(newPassword, nil) // 조회해도 값은 그대로 → 세대 불변
-	_, _ = c.Connect(context.Background())
+	// 세대 1을 들고 뒤늦게 실패한 호출을 그대로 재현한다.
+	if ch := p.RequestRefresh(1); ch != nil {
+		t.Error("낡은 세대의 실패가 재조회를 시작했다")
+	}
+	if f.count() != 1 {
+		t.Errorf("조회 %d회 — 1회여야 한다", f.count())
+	}
+}
 
-	if p.Current().Generation != gen {
-		t.Errorf("세대가 %d → %d로 변했다 — 값이 같으면 불변이어야 한다", gen, p.Current().Generation)
+// ⑤-b 늦게 끝난 옛 세대 dial이 실패하면, 조회 없이 **현재 값**으로 재시도해 성공한다.
+// 두 dial을 채널로 순서 제어한다 — 순차 호출로는 이 경로가 재현되지 않는다.
+func TestLateFailureRedialsWithCurrentValue(t *testing.T) {
+	f := &fakeFetch{value: newPassword}
+	p, c, d, _ := newTestSetup(t, f.fn)
+
+	release := make(chan struct{})
+	d.blockDial(oldPassword, release)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Connect(context.Background())
+		done <- err
+	}()
+	d.waitForAttempt(t, oldPassword) // 이 호출은 세대 1(옛 값)을 들고 dial에 들어가 있다
+
+	// 그동안 다른 연결이 먼저 회복해 세대가 2로 올라간다.
+	res := <-p.RequestRefresh(1)
+	if res.Err != nil {
+		t.Fatalf("refresh 실패: %v", res.Err)
+	}
+	if got := p.Current().Generation; got != 2 {
+		t.Fatalf("세대 %d — 2여야 한다", got)
+	}
+
+	close(release) // 붙잡아 둔 dial이 이제 28P01로 끝난다
+	if err := <-done; err != nil {
+		t.Fatalf("낡은 실패는 현재 값으로 재시도해 성공해야 한다: %v", err)
+	}
+	if f.count() != 1 {
+		t.Errorf("조회 %d회 — 낡은 실패가 새 조회를 만들면 안 된다", f.count())
 	}
 	if p.Current().Password != newPassword {
 		t.Error("비밀번호가 옛 값으로 되돌아갔다")
+	}
+}
+
+// 게이트가 닫힌 뒤 비행에 들어온 호출은 조회하지 않는다.
+// RequestRefresh의 게이트 확인과 DoChan 등록 사이에 먼저 끝난 비행이 게이트를 닫는 경로이고
+// (round-1 codex-cli#2), 비행 함수를 직접 불러 그 틈을 결정적으로 재현한다.
+func TestClosedGateInsideFlightSkipsFetch(t *testing.T) {
+	clock := newFakeClock()
+	f := &fakeFetch{value: oldPassword} // 값 동일 → 게이트가 닫힌다
+	p, c, _, _ := newTestSetup(t, f.fn, WithClock(clock.now), WithJitter(func(x float64) float64 { return x }))
+
+	_, _ = c.Connect(context.Background())
+	if f.count() != 1 {
+		t.Fatalf("조회 %d회 — 1회여야 한다", f.count())
+	}
+
+	if _, err := p.doRefresh(p.Current().Generation); err != nil {
+		t.Fatalf("예상치 못한 오류: %v", err)
+	}
+	if f.count() != 1 {
+		t.Errorf("조회 %d회 — 닫힌 게이트에서는 비행 안에서도 조회하지 않아야 한다", f.count())
+	}
+}
+
+// ⑬ 분류기는 다단 래핑에서도 28P01을 찾고, 그렇지 않은 다중 오류는 걸러낸다.
+func TestIsAuthFailureAcrossErrorShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "맨 PgError", err: bareAuthErr(), want: true},
+		{name: "production 다단 래핑", err: authErr(), want: true},
+		{name: "다른 SQLSTATE", err: fmt.Errorf("server error: %w",
+			&pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}), want: false},
+		{name: "래핑된 네트워크 오류", err: fmt.Errorf("failed to connect: %w",
+			errors.Join(errors.New("i/o timeout"), errors.New("connection refused"))), want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isAuthFailure(c.err); got != c.want {
+				t.Errorf("isAuthFailure=%v — %v여야 한다", got, c.want)
+			}
+		})
 	}
 }
 
@@ -478,7 +606,7 @@ func TestCloseStopsRefresh(t *testing.T) {
 	if f.count() != 0 {
 		t.Errorf("Close 뒤 재조회 %d회 — 0회여야 한다", f.count())
 	}
-	if p.RequestRefresh() != nil {
+	if p.RequestRefresh(p.Current().Generation) != nil {
 		t.Error("Close 뒤 RequestRefresh는 nil이어야 한다")
 	}
 }
@@ -512,7 +640,7 @@ func TestStaticModeNeverRefreshes(t *testing.T) {
 	if p.Mode() != "static" {
 		t.Errorf("Mode()=%q — static이어야 한다", p.Mode())
 	}
-	if p.RequestRefresh() != nil {
+	if p.RequestRefresh(p.Current().Generation) != nil {
 		t.Error("정적 모드에서는 refresh 채널이 없어야 한다")
 	}
 }
@@ -573,7 +701,12 @@ func TestFallbackCannotRecoverAfterRotationWhenSDKIsDown(t *testing.T) {
 	if p.Current().Generation != 1 {
 		t.Error("조회가 실패했으므로 세대는 그대로여야 한다")
 	}
-	// 장애가 조용히 지나가지 않는다.
+	// 장애가 조용히 지나가지 않는다 — 실패 사유가 조회마다 남아야 IAM 거부·타임아웃·
+	// 회전 중 창을 운영자가 구분할 수 있다(round-1 codex-cli#4).
+	if cap.countEvent("secret_refresh_failed") != f.count() {
+		t.Errorf("secret_refresh_failed %d회 — 조회 %d회와 같아야 한다",
+			cap.countEvent("secret_refresh_failed"), f.count())
+	}
 	if cap.countEvent("auth_failed_observed") != 1 {
 		t.Errorf("auth_failed_observed %d회 — 세대당 1회 남아야 한다", cap.countEvent("auth_failed_observed"))
 	}

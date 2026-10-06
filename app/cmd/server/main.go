@@ -159,6 +159,11 @@ func logProviderMode(p *dbcreds.Provider, cfg config.Config) {
 		// ARN 자체가 아니라 시크릿 이름만 남긴다(계정 ID를 로그에 흘리지 않는다).
 		attrs = append(attrs, "secret_name", secretNameFromARN(cfg.DBSecretARN))
 	}
+	if cfg.ConnMaxLifetimeRejected != "" {
+		// 지정값이 무시되고 기본값이 쓰였다는 유일한 신호다. 2-6이 T_fail을 설계로 만들 때
+		// 이 줄을 놓치면 신규 연결이 유도되지 않은 이유를 찾지 못한다.
+		attrs = append(attrs, "conn_max_lifetime_rejected", cfg.ConnMaxLifetimeRejected)
+	}
 	slog.Info("DB 자격증명 provider 준비", attrs...)
 }
 

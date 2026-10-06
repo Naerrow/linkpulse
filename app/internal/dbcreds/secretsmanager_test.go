@@ -17,13 +17,17 @@ func TestRegionFromSecretARN(t *testing.T) {
 	}{
 		{
 			name: "RDS 관리 시크릿",
-			arn:  "arn:aws:secretsmanager:ap-northeast-2:644076162314:secret:rds!db-af3ffe20-E9J0rG",
+			arn:  "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:rds!db-00000000-AbCdEf",
 			want: "ap-northeast-2",
 		},
 		{name: "리전 비어 있음", arn: "arn:aws:secretsmanager::123:secret:x", wantErr: true},
 		{name: "다른 서비스", arn: "arn:aws:ssm:ap-northeast-2:123:parameter/x", wantErr: true},
 		{name: "ARN 아님", arn: "just-a-name", wantErr: true},
 		{name: "빈 값", arn: "", wantErr: true},
+		// 서비스·리전은 맞지만 시크릿을 지목하지 않는 ARN. 리전만 뽑던 검사는 이것을 통과시켜
+		// 결함이 첫 회전 때까지 숨었다(round-1 codex-cli#5).
+		{name: "리소스가 secret이 아님", arn: "arn:aws:secretsmanager:ap-northeast-2:123456789012:not-a-secret", wantErr: true},
+		{name: "계정 비어 있음", arn: "arn:aws:secretsmanager:ap-northeast-2::secret:x", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -168,32 +168,49 @@ func (p *Provider) NoteRecovered(gen uint64) {
 
 // RequestRefresh는 재조회를 요청하고 결과 채널을 돌려준다.
 //
-// backoff 게이트가 닫혀 있거나 정적 모드면 nil을 반환한다 — 호출자는 기다리지 않고 즉시
+// failedGen은 28P01을 관찰한 호출이 그때 쓰던 세대다. **그 세대가 이미 낡았으면 조회하지
+// 않는다** — 다른 연결이 먼저 갱신했다는 뜻이고, 늦게 도착한 옛 실패로 조회를 시작하면
+// (1) 비단조적 응답이 옛 값을 새 세대로 올려 복구를 되돌리거나 (2) 값 동일 판정으로 게이트를
+// 닫아 바로 뒤에 올 정상 refresh를 최대 maxBackoff만큼 늦춘다.
+//
+// backoff 게이트가 닫혀 있거나 정적 모드여도 nil을 반환한다 — 호출자는 기다리지 않고 즉시
 // 오류로 끝내고, 다음 Connect가 다시 시도한다. 게이트 대기를 Connect 안에서 하지 않는 이유는
 // 그만큼 opener를 점유하기 때문이다.
 //
 // 반환 채널을 호출자가 버려도 refresh는 detached context에서 끝까지 돌고 결과가
 // provider 상태에 반영된다. 그것이 "다음 Connect가 승계한다"의 실체다.
-func (p *Provider) RequestRefresh() <-chan singleflight.Result {
+func (p *Provider) RequestRefresh(failedGen uint64) <-chan singleflight.Result {
 	if p.fetch == nil {
 		return nil
 	}
 	p.mu.Lock()
-	if p.now().Before(p.gateOpen) {
-		p.mu.Unlock()
+	skip := p.cred.Generation != failedGen || p.now().Before(p.gateOpen)
+	p.mu.Unlock()
+	if skip {
 		return nil
 	}
-	p.mu.Unlock()
 
 	if p.refreshCtx.Err() != nil { // Close() 이후
 		return nil
 	}
-	return p.group.DoChan(refreshKey, p.doRefresh)
+	return p.group.DoChan(refreshKey, func() (any, error) { return p.doRefresh(failedGen) })
 }
 
 // doRefresh는 singleflight 안에서 실제 조회를 수행한다.
 // 호출자 context가 아니라 provider 소유의 refreshCtx에서 돈다(detached).
-func (p *Provider) doRefresh() (any, error) {
+//
+// startGen·게이트를 **비행 안에서 다시** 확인한다. RequestRefresh의 확인과 DoChan 등록
+// 사이에는 틈이 있어서, 먼저 끝난 비행이 게이트를 닫거나 세대를 올린 뒤에 들어온 호출이
+// 새 비행을 시작할 수 있다 — 그러면 backoff가 무력해지고 조회가 동시 호출 수만큼 늘어난다.
+func (p *Provider) doRefresh(startGen uint64) (any, error) {
+	p.mu.Lock()
+	if p.cred.Generation != startGen || p.now().Before(p.gateOpen) {
+		cred := p.cred
+		p.mu.Unlock()
+		return cred, nil
+	}
+	p.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(p.refreshCtx, RefreshTimeout)
 	defer cancel()
 
@@ -204,7 +221,21 @@ func (p *Provider) doRefresh() (any, error) {
 
 	if err != nil {
 		p.advanceBackoffLocked()
+		// 실패 사유를 남기지 않으면 운영자가 IAM 거부·SDK 타임아웃·회전 중 창을 구분할 수 없다.
+		// 조회 실패 경로에는 비밀값이 없고(SDK는 값을 오류에 넣지 않는다, JSON 파싱 오류는
+		// 타입만 남긴다) 호출은 게이트로 이미 제한돼 있어 메시지를 그대로 실어도 안전하다.
+		p.log.Warn("비밀번호 refresh 실패",
+			"event", "secret_refresh_failed", "generation", p.cred.Generation,
+			"retry_after", p.gateOpen.Format(time.RFC3339Nano), "error", err.Error())
 		return p.cred, err
+	}
+	if p.cred.Generation != startGen {
+		// 비행 중에 세대가 전진했다면 이 조회 결과는 그보다 낡았을 수 있으므로 버린다.
+		// 현재 코드에서 세대는 이 함수 안에서만, 즉 singleflight 비행 안에서만 오르므로
+		// 도달하지 않는다. 그래도 남기는 이유는 **그 안전성이 singleflight의 직렬화라는
+		// 비자명한 성질에 기대고 있어서다** — 세대를 올리는 경로가 하나라도 늘면 복구된
+		// 값이 옛 값으로 되돌아간다. 네 줄로 그 가능성을 지역적으로 닫는다.
+		return p.cred, nil
 	}
 	if password == p.cred.Password {
 		// 회전 중 창: DB는 새 비밀번호인데 AWSCURRENT는 아직 옛 값이다.

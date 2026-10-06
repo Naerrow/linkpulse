@@ -13,7 +13,7 @@ func TestTaskIDFromMetadata(t *testing.T) {
 		if r.URL.Path != "/task" {
 			t.Errorf("경로가 %q — TaskARN은 /task 응답의 계약이다", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"Cluster":"linkpulse-prod-cluster","TaskARN":"arn:aws:ecs:ap-northeast-2:644076162314:task/linkpulse-prod-cluster/abc123def456"}`))
+		_, _ = w.Write([]byte(`{"Cluster":"linkpulse-test-cluster","TaskARN":"arn:aws:ecs:ap-northeast-2:123456789012:task/linkpulse-test-cluster/abc123def456"}`))
 	}))
 	defer srv.Close()
 

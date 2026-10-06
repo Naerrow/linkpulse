@@ -144,10 +144,23 @@ func TestLoad_AppEnvGuard(t *testing.T) {
 			},
 		},
 		{
-			name: "production + DATABASE_URL + 회전 env → 정상", // (c)
+			// DATABASE_URL 경로는 비밀번호를 DSN 안에만 두고 cfg.DBPassword를 비워 둔다.
+			// 그 상태로 provider를 만들면 seed가 빈 문자열이 되어 2-3 (a)의 폴백이 깨진다.
+			name: "production + DATABASE_URL + DB_SECRET_ARN → 에러", // (c)
 			env: map[string]string{
 				"APP_ENV": "production", "DATABASE_URL": "postgres://u:p@h:5432/db?sslmode=disable",
 				"DB_SECRET_ARN": testSecretARN, "AWS_REGION": "ap-northeast-2",
+			},
+			wantErr: true,
+		},
+		{
+			// 반대로 ARN이 없으면 정적 모드라 문제가 없다(로컬 docker-compose 경로).
+			name: "DATABASE_URL 단독 → 정상(정적 모드)", // (c-1)
+			env:  map[string]string{"APP_ENV": "", "DATABASE_URL": "postgres://u:p@h:5432/db?sslmode=disable"},
+			check: func(t *testing.T, cfg Config) {
+				if cfg.DBSecretARN != "" {
+					t.Error("정적 모드에서는 ARN이 비어 있어야 한다")
+				}
 			},
 		},
 		{
@@ -267,20 +280,25 @@ func TestValidateRotationEnv(t *testing.T) {
 // DB_CONN_MAX_LIFETIME은 검증 편의용 손잡이라 잘못된 값에도 기동을 막지 않는다.
 func TestResolveConnMaxLifetime(t *testing.T) {
 	tests := []struct {
-		name, value string
-		want        time.Duration
+		name, value  string
+		want         time.Duration
+		wantRejected string // 기동 로그에 남아야 할 원문. 빈 값이면 정상.
 	}{
 		{name: "미설정 → 기본 5분", value: "", want: 5 * time.Minute},
 		{name: "30s → 30s", value: "30s", want: 30 * time.Second},
-		{name: "파싱 실패 → 기본값", value: "abc", want: 5 * time.Minute},
-		{name: "0 → 기본값", value: "0s", want: 5 * time.Minute},
-		{name: "음수 → 기본값", value: "-1s", want: 5 * time.Minute},
+		{name: "파싱 실패 → 기본값", value: "abc", want: 5 * time.Minute, wantRejected: "abc"},
+		{name: "0 → 기본값", value: "0s", want: 5 * time.Minute, wantRejected: "0s"},
+		{name: "음수 → 기본값", value: "-1s", want: 5 * time.Minute, wantRejected: "-1s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("DB_CONN_MAX_LIFETIME", tt.value)
-			if got := resolveConnMaxLifetime(); got != tt.want {
+			got, rejected := resolveConnMaxLifetime()
+			if got != tt.want {
 				t.Errorf("%v — %v여야 한다", got, tt.want)
+			}
+			if rejected != tt.wantRejected {
+				t.Errorf("거부 원문 %q — %q여야 한다", rejected, tt.wantRejected)
 			}
 		})
 	}

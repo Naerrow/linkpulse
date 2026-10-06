@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -31,22 +32,37 @@ const (
 // 회전 중 AWSPENDING은 아직 DB에 반영되지 않았을 수 있다.
 const awscurrent = "AWSCURRENT"
 
-// RegionFromSecretARN은 시크릿 ARN에서 리전을 뽑는다.
+// RegionFromSecretARN은 시크릿 ARN을 검증하고 리전을 뽑는다.
 //
 // 이것이 SDK 리전의 source of truth다. ECS Fargate는 Lambda와 달리 AWS_REGION을 자동 주입하지
 // 않고 SDK v2에는 기본 리전이 없다. ARN은 리전을 항상 포함하고 어차피 시크릿을 지목하는
 // 값이라 리전이 어긋날 수 없다.
 //
+// 리전만 뽑고 끝내면 `arn:aws:secretsmanager:<region>:<account>:not-a-secret`처럼 **시크릿이
+// 아닌 ARN이 기동 검사를 통과**한다. 그러면 결함이 다음 회전 때까지 드러나지 않는다 —
+// 2-2의 fail-fast가 막으려던 바로 그 경로다. 그래서 서비스·리소스 종류까지 본다.
+//
 // 형식: arn:aws:secretsmanager:<region>:<account>:secret:<name>
-func RegionFromSecretARN(arn string) (string, error) {
-	parts := strings.Split(arn, ":")
-	if len(parts) < 6 || parts[0] != "arn" || parts[2] != "secretsmanager" {
-		return "", fmt.Errorf("시크릿 ARN 형식이 아닙니다: %q", arn)
+func RegionFromSecretARN(raw string) (string, error) {
+	parsed, err := arn.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("시크릿 ARN 형식이 아닙니다(%v): %q", err, raw)
 	}
-	if parts[3] == "" {
-		return "", fmt.Errorf("시크릿 ARN에 리전이 없습니다: %q", arn)
+	if parsed.Service != "secretsmanager" {
+		return "", fmt.Errorf("secretsmanager ARN이 아닙니다: %q", raw)
 	}
-	return parts[3], nil
+	if parsed.Region == "" {
+		return "", fmt.Errorf("시크릿 ARN에 리전이 없습니다: %q", raw)
+	}
+	if parsed.AccountID == "" {
+		return "", fmt.Errorf("시크릿 ARN에 계정이 없습니다: %q", raw)
+	}
+	// 파티션(aws/aws-cn/aws-us-gov)은 검사하지 않는다 — 이 서비스는 상용 파티션에서만 돌지만
+	// 그 제약을 코드로 박을 이유가 없고, 리전 교차검사가 같은 실수를 이미 잡는다.
+	if !strings.HasPrefix(parsed.Resource, "secret:") {
+		return "", fmt.Errorf("시크릿 리소스 ARN이 아닙니다: %q", raw)
+	}
+	return parsed.Region, nil
 }
 
 // NewSecretsManagerFetch는 AWSCURRENT 비밀번호를 읽는 FetchFunc를 만든다.

@@ -53,8 +53,9 @@ func (c *Connector) Driver() driver.Driver { return c.drv }
 //
 //  1. 현재 세대 비밀번호로 dial      timeout = min(ctx 잔여, 5초)
 //  2. 성공 → 반환
-//  3. 28P01 관찰 → refresh 요청(단일 비행, detached)
-//  4. min(ctx 잔여, 3초)까지만 결과를 기다린다
+//  3. 28P01 관찰 → 그 사이 다른 연결이 갱신했으면 조회 없이 현재 값으로 재시도
+//  4. 아직 최신 세대의 실패라면 refresh 요청(단일 비행, detached)
+//  5. min(ctx 잔여, 3초)까지만 결과를 기다린다
 //     값이 오면 → 새 값으로 dial 재시도 → 반환
 //     안 오면   → 오류 반환 (refresh는 계속되고 다음 Connect가 승계한다)
 //
@@ -74,7 +75,13 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	}
 	c.provider.NoteAuthFailure(cred.Generation)
 
-	ch := c.provider.RequestRefresh()
+	// 실패한 세대가 이미 낡았다면(다른 연결이 먼저 갱신했다) 조회할 이유가 없다.
+	// 현재 값으로 한 번 더 시도한다 — 이 경로에서도 dial은 2회를 넘지 않는다.
+	if cur := c.provider.Current(); cur.Generation != cred.Generation {
+		return c.redial(ctx, cur)
+	}
+
+	ch := c.provider.RequestRefresh(cred.Generation)
 	if ch == nil {
 		// backoff 게이트가 닫혀 있거나 정적 모드다. 여기서 기다리면 opener를 점유한다.
 		return nil, err
@@ -95,13 +102,18 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 			// 값이 그대로다 — 회전 중 창. 다음 Connect가 다시 시도한다.
 			return nil, err
 		}
-		conn, dialErr := c.dialWithTimeout(ctx, fresh.Password)
-		if dialErr != nil {
-			return nil, dialErr
-		}
-		c.provider.NoteRecovered(fresh.Generation)
-		return conn, nil
+		return c.redial(ctx, fresh)
 	}
+}
+
+// redial은 갱신된 세대로 한 번 더 시도한다. 성공했을 때만 회복으로 기록한다.
+func (c *Connector) redial(ctx context.Context, cred Credential) (driver.Conn, error) {
+	conn, err := c.dialWithTimeout(ctx, cred.Password)
+	if err != nil {
+		return nil, err
+	}
+	c.provider.NoteRecovered(cred.Generation)
+	return conn, nil
 }
 
 // dialWithTimeout은 호출자 ctx와 dial 상한 중 짧은 쪽을 적용한다.
