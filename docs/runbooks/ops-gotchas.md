@@ -28,6 +28,19 @@ gh auth switch --user Naerrow
 **재발 방지** — PR 생성·머지·코멘트 전에 활성 계정을 먼저 본다. 증상이 머지에만 나는 것이 아니라
 **PR 생성도 막힌다.** 읽기 명령(`gh pr view`, `gh pr checks`)은 READ로도 되기 때문에 중간까지는 멀쩡해 보인다.
 
+**2차 발생 (2026-10-06, Step 2 PR)** — `git push`는 성공하고 `gh pr create`만 실패했다.
+**git과 gh가 서로 다른 자격증명을 쓰기 때문**이다. 브랜치는 원격에 올라가 있으니 `git status -sb`로는
+정상으로 보이고, PR이 없다는 사실은 따로 확인해야 드러난다.
+```bash
+git status -sb | head -1                                   # 푸시만 확인 — PR 유무는 모른다
+gh pr list --state all --head "$(git branch --show-current)"  # [] 면 PR이 없는 것이다
+```
+→ **`gh`로 쓰기 동작을 하기 전에는 활성 계정 확인을 명령 앞에 붙인다.**
+```bash
+gh auth switch --user Naerrow && gh repo view --json viewerPermission
+# "ADMIN" 또는 "WRITE" 를 확인한 뒤에만 gh pr create / merge / comment
+```
+
 ---
 
 ## G-2. `terraform init`/`plan`이 자격증명 만료로 실패

@@ -83,7 +83,12 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 
 	ch := c.provider.RequestRefresh(cred.Generation)
 	if ch == nil {
-		// backoff 게이트가 닫혀 있거나 정적 모드다. 여기서 기다리면 opener를 점유한다.
+		// nil의 원인은 셋이다: 정적 모드 · backoff 게이트가 닫힘 · **위 확인과 provider 잠금 사이에
+		// 세대가 전진**. 마지막 경우에는 유효한 현재 값이 있으므로 그냥 실패를 돌려줄 이유가 없다.
+		if cur := c.provider.Current(); cur.Generation != cred.Generation {
+			return c.redial(ctx, cur)
+		}
+		// 남은 둘은 기다릴 대상이 없다. 여기서 기다리면 opener를 점유한다.
 		return nil, err
 	}
 

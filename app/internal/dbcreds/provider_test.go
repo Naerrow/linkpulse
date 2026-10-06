@@ -400,7 +400,8 @@ func TestClosedGateInsideFlightSkipsFetch(t *testing.T) {
 	}
 }
 
-// ⑬ 분류기는 다단 래핑에서도 28P01을 찾고, 그렇지 않은 다중 오류는 걸러낸다.
+// 분류기는 다단 래핑에서도 28P01을 찾고, 그렇지 않은 다중 오류는 걸러낸다.
+// (번호를 붙이지 않는다 — plan의 ⑬은 secretsmanager_test.go의 시도당 상한이다.)
 func TestIsAuthFailureAcrossErrorShapes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -573,7 +574,7 @@ func TestRecoveredLogSeparateFromRefresh(t *testing.T) {
 func TestAuthFailedObservedOncePerGeneration(t *testing.T) {
 	f := &fakeFetch{value: oldPassword} // 값이 안 바뀌어 세대가 유지된다
 	clock := newFakeClock()
-	_, c, _, cap := newTestSetup(t, f.fn, WithClock(clock.now), WithJitter(func(f float64) float64 { return f }))
+	_, c, d, cap := newTestSetup(t, f.fn, WithClock(clock.now), WithJitter(func(f float64) float64 { return f }))
 
 	for i := 0; i < 5; i++ {
 		_, _ = c.Connect(context.Background())
@@ -583,14 +584,30 @@ func TestAuthFailedObservedOncePerGeneration(t *testing.T) {
 		t.Errorf("auth_failed_observed %d회 — 같은 세대에서는 1회여야 한다(폭주 방지)", n)
 	}
 
+	// ⚠️ 여기서 **같은 provider**로 세대를 전이시켜야 한다. 새 provider를 만들면 세대 1에서
+	// 처음 실패하는 것뿐이라 "세대가 바뀌면 다시 난다"를 전혀 시험하지 못한다.
+	// 변이로 확인: NoteAuthFailure를 "평생 1회"로 바꿔도 예전 테스트는 전원 통과했다
+	// (round-2 claude-ide#4). 한 태스크가 **두 번째 회전**을 맞으면 T_fail 로그가 사라지고
+	// 2-6이 판정 불가에 빠지는 경로다.
 	f.set(newPassword, nil)
-	_, _ = c.Connect(context.Background()) // 세대 2로 전이
-	// 세대 2에서 다시 실패시킨다.
-	_, c2, d2, cap2 := newTestSetup(t, f.fn)
-	_ = d2
-	_, _ = c2.Connect(context.Background())
-	if cap2.countEvent("auth_failed_observed") < 1 {
-		t.Error("새 세대에서는 auth_failed_observed가 다시 나야 한다")
+	if _, err := c.Connect(context.Background()); err != nil {
+		t.Fatalf("세대 2로 전이하지 못했다: %v", err)
+	}
+
+	// 두 번째 회전: DB가 또 다른 비밀번호만 받는다.
+	const thirdPassword = "third-secret-value"
+	d.setAccepts(thirdPassword)
+	f.set(thirdPassword, nil)
+	clock.advance(maxBackoff)
+	if _, err := c.Connect(context.Background()); err != nil {
+		t.Fatalf("세대 3으로 회복하지 못했다: %v", err)
+	}
+
+	if n := cap.countEvent("auth_failed_observed"); n != 2 {
+		t.Errorf("auth_failed_observed %d회 — 세대가 바뀌었으니 2회여야 한다(⑮)", n)
+	}
+	if n := cap.countEvent("credential_recovered"); n != 2 {
+		t.Errorf("credential_recovered %d회 — 세대 전이 2회만큼 나야 한다(⑫)", n)
 	}
 }
 
@@ -608,6 +625,41 @@ func TestCloseStopsRefresh(t *testing.T) {
 	}
 	if p.RequestRefresh(p.Current().Generation) != nil {
 		t.Error("Close 뒤 RequestRefresh는 nil이어야 한다")
+	}
+}
+
+// ⑭-b 진행 **중인** refresh를 Close()가 취소한다.
+// 위 테스트는 refresh가 시작되기 전에 닫으므로 이 경로를 지나지 않는다(round-2 claude-ide).
+// 앱 종료 시 detached 작업이 최대 RefreshTimeout(10초) 동안 남아 있지 않다는 보장이 여기서 선다.
+func TestCloseCancelsInFlightRefresh(t *testing.T) {
+	f := &fakeFetch{value: newPassword, delay: 5 * time.Second}
+	p, _, _, _ := newTestSetup(t, f.fn)
+
+	ch := p.RequestRefresh(p.Current().Generation)
+	if ch == nil {
+		t.Fatal("refresh가 시작되지 않았다")
+	}
+	// notify는 지연 **뒤에** 울리므로 쓸 수 없다. 조회가 들어갔다는 사실만 센다.
+	deadline := time.Now().Add(2 * time.Second)
+	for f.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if f.count() == 0 {
+		t.Fatal("조회가 시작되지 않았다")
+	}
+
+	p.Close()
+
+	select {
+	case res := <-ch:
+		if res.Err == nil {
+			t.Error("Close가 진행 중인 refresh를 취소하지 않았다 — 오류 없이 끝났다")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close 뒤에도 refresh가 끝나지 않았다 — 종료가 최대 10초 지연된다")
+	}
+	if p.Current().Generation != 1 {
+		t.Error("취소된 refresh가 세대를 올렸다")
 	}
 }
 

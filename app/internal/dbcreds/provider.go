@@ -139,7 +139,10 @@ func (p *Provider) Close() { p.cancel() }
 // 가르는 데 이 로그가 필요하다. 둘은 이 로그 없이는 완전히 같아 보인다.
 func (p *Provider) NoteAuthFailure(gen uint64) {
 	p.mu.Lock()
-	if p.authFailedGen == gen {
+	// 단조 비교다(NoteRecovered와 같은 규칙). ==로 두면 세대 N이 실패한 뒤 **늦게 도착한 세대 N-1
+	// 실패**가 auth_failed_observed(N-1)을 다시 찍어, 2-6 판정표의 "세대·순서가 어긋남 = 확정 결함"
+	// 행이 잘못 걸린다. 낡은 세대 redial이 이제 명시적 경로라 더 자주 생길 수 있다.
+	if p.authFailedGen >= gen {
 		p.mu.Unlock()
 		return
 	}
@@ -222,11 +225,16 @@ func (p *Provider) doRefresh(startGen uint64) (any, error) {
 	if err != nil {
 		p.advanceBackoffLocked()
 		// 실패 사유를 남기지 않으면 운영자가 IAM 거부·SDK 타임아웃·회전 중 창을 구분할 수 없다.
-		// 조회 실패 경로에는 비밀값이 없고(SDK는 값을 오류에 넣지 않는다, JSON 파싱 오류는
-		// 타입만 남긴다) 호출은 게이트로 이미 제한돼 있어 메시지를 그대로 실어도 안전하다.
-		p.log.Warn("비밀번호 refresh 실패",
-			"event", "secret_refresh_failed", "generation", p.cred.Generation,
-			"retry_after", p.gateOpen.Format(time.RFC3339Nano), "error", err.Error())
+		// **로그 정책**: 평시 로그(기동 줄)에는 ARN을 넣지 않지만, 조회 실패에서는 원인 식별이
+		// 우선이라 SDK 메시지를 그대로 싣는다 — AccessDenied 본문에는 role·시크릿 ARN이 들어 있고
+		// 그것이 바로 운영자가 봐야 할 내용이다(로그 목적지인 CloudWatch는 비공개다).
+		// 비밀번호는 어느 경로로도 들어가지 않는다(SDK는 값을 오류에 넣지 않고, JSON 파싱 오류는
+		// redactJSONError가 타입만 남긴다).
+		if p.refreshCtx.Err() == nil { // 앱 종료로 인한 취소는 운영 신호가 아니다
+			p.log.Warn("비밀번호 refresh 실패",
+				"event", "secret_refresh_failed", "generation", p.cred.Generation,
+				"retry_after", p.gateOpen.Format(time.RFC3339Nano), "error", err.Error())
+		}
 		return p.cred, err
 	}
 	if p.cred.Generation != startGen {

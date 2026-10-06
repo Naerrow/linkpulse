@@ -12,8 +12,11 @@
 //	docker run -d --rm --name linkpulse-it-pg -e POSTGRES_PASSWORD=itpw \
 //	  -p 55432:5432 postgres:16-alpine
 //	LINKPULSE_IT_DSN='postgres://postgres:itpw@localhost:55432/postgres?sslmode=disable' \
-//	  go test -tags=integration -v -timeout 5m ./internal/db/
+//	  go test -tags=integration -race -v -timeout 5m ./internal/db/
 //	docker stop linkpulse-it-pg
+//
+// `-race`는 선택이 아니다 — 검증 ⑯("dialWith가 원본 ConnConfig를 건드리지 않는다")의 위반은
+// 낡은 세대 redial이 흡수해 **테스트가 통과해 버리고**, 레이스 검출기만 그것을 잡는다.
 //
 // ⚠️ **compose의 db 서비스를 쓰지 않는다.** 그 서비스에는 published port가 없어
 // (`docker compose port db 5432` → `:0`) 호스트의 5432로는 닿지 않는다. 그 주소로 붙이면
@@ -109,12 +112,13 @@ func TestRotationSurvivesStaleSecretWindow(t *testing.T) {
 	forceNewConnections(pool)
 
 	// 구값 창 동안 계속 실패하되, 재조회가 폭주하지 않아야 한다(backoff 계약).
-	deadline := tAvail.Add(deadlineFromTAvail)
-	elapsed := waitForQueryUntil(t, pool, deadline, tAvail)
+	elapsed := waitForQuery(t, pool, deadlineFromTAvail, tAvail)
 	t.Logf("(b) T_avail → 쿼리 성공: %v (합격 ≤ %v, 구값 창 %v)", elapsed, deadlineFromTAvail, staleWindowD)
 
-	// 구값 창은 최소 200ms backoff로 제한된다 — 20초 동안 폭주하면 수천 번이 된다.
-	// 상한은 넉넉히 잡는다. 여기서 보는 것은 "폭주가 아니다"이지 정확한 횟수가 아니다.
+	// ⚠️ 이 임계는 **폴링 간격(200ms)에 의존한다.** backoff가 없어도 20초 창에서 조회는 약 95회지
+	// 수천 회가 아니다 — 조회를 유발하는 것은 쿼리 시도이고 그 간격이 200ms이기 때문이다.
+	// 즉 60은 "backoff가 폴링보다 더 묶는가"를 보는 값이다(실측 13회). 폴링 간격을 바꾸면
+	// 이 임계도 다시 계산한다. 정확한 횟수가 아니라 "폭주가 아니다"를 본다.
 	if calls := secret.callCount(); calls > 60 {
 		t.Errorf("구값 창에서 조회 %d회 — backoff가 듣지 않는다", calls)
 	} else {
@@ -122,6 +126,17 @@ func TestRotationSurvivesStaleSecretWindow(t *testing.T) {
 	}
 	if got := env.logs.count("secret_refresh_failed"); got != 0 {
 		t.Errorf("secret_refresh_failed %d회 — 조회 자체는 성공했으므로 0이어야 한다", got)
+	}
+	// 구값 창에서 조회는 여러 번이지만 **세대 전이는 정확히 1회**여야 한다.
+	// 단위 ⑥("값 동일 refresh는 세대를 올리지 않는다")의 실경로판이다.
+	if got := env.logs.count("secret_refreshed"); got != 1 {
+		t.Errorf("secret_refreshed %d회 — 값이 바뀐 1회만 세대를 올려야 한다", got)
+	}
+	if got := env.logs.count("credential_recovered"); got != 1 {
+		t.Errorf("credential_recovered %d회 — 1회여야 한다", got)
+	}
+	if got := env.logs.count("auth_failed_observed"); got == 0 {
+		t.Error("auth_failed_observed가 없다 — 28P01을 한 번도 관찰하지 못했다")
 	}
 	assertNoGoroutineLeak(t, goroutinesBefore)
 }
@@ -228,6 +243,7 @@ func TestConcurrentConnectionsShareSingleFetch(t *testing.T) {
 	forceNewConnections(pool)
 
 	var wg sync.WaitGroup
+	failures := make(chan error, 16)
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		go func() {
@@ -235,15 +251,25 @@ func TestConcurrentConnectionsShareSingleFetch(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), deadlineFromTSet)
 			defer cancel()
 			var one int
-			_ = pool.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+			if err := pool.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+				failures <- err
+			}
 		}()
 	}
 	wg.Wait()
+	close(failures)
+	for err := range failures {
+		t.Errorf("동시 쿼리 실패: %v", err)
+	}
 
-	// 세대 전이는 1회여야 한다. 조회가 여러 번이어도 값이 같으면 세대는 오르지 않지만,
-	// 여기서는 16개 동시 실패가 한 비행으로 합쳐지는지를 본다.
-	if calls := secret.callCount(); calls > 2 {
-		t.Errorf("조회 %d회 — singleflight면 1회(경합 시 최대 2회)여야 한다", calls)
+	// ⚠️ **1회만 통과**다. "경합 시 2회까지"로 느슨하게 두면 round-1 결함이 되살아나도 못 잡는다 —
+	// 그 결함 코드(865b2d2)의 지문이 바로 **조회 2회**였다(round-2 리뷰 실측: 200회 중 190회가 2회,
+	// 수정 후 HEAD는 200회 전부 1회). plan 2-4도 "1회로 합쳐지는지"를 요구한다.
+	if calls := secret.callCount(); calls != 1 {
+		t.Errorf("조회 %d회 — singleflight면 정확히 1회여야 한다", calls)
+	}
+	if got := env.logs.count("secret_refreshed"); got != 1 {
+		t.Errorf("secret_refreshed %d회 — 세대 전이는 1회여야 한다", got)
 	}
 	if got := env.logs.count("credential_recovered"); got != 1 {
 		t.Errorf("credential_recovered %d회 — 세대당 1회여야 한다", got)
@@ -291,7 +317,11 @@ func newRotationEnv(t *testing.T) *rotationEnv {
 	t.Helper()
 	adminDSN := os.Getenv("LINKPULSE_IT_DSN")
 	if adminDSN == "" {
-		t.Skip("LINKPULSE_IT_DSN 미설정 — 통합 테스트를 건너뛴다(docker compose up -d db 후 지정)")
+		// ⚠️ compose의 db를 안내하지 않는다 — published port가 없어 호스트의 다른 Postgres에
+		// 붙고, 이 테스트는 거기에 role과 DB를 만든다(ops-gotchas G-7). 머리 주석의 절차를 가리킨다.
+		t.Skip("LINKPULSE_IT_DSN 미설정 — 통합 테스트를 건너뛴다. " +
+			"일회용 컨테이너로 띄운다: docker run -d --rm --name linkpulse-it-pg " +
+			"-e POSTGRES_PASSWORD=itpw -p 55432:5432 postgres:16-alpine (이 파일 머리 주석 참고)")
 	}
 
 	admin, err := sql.Open("pgx", adminDSN)
@@ -323,15 +353,26 @@ func newRotationEnv(t *testing.T) *rotationEnv {
 		mustExec(t, admin, fmt.Sprintf("DROP ROLE IF EXISTS %s", name))
 	})
 
-	return &rotationEnv{
-		admin: admin,
-		role:  name,
-		dsnFor: func(password string) string {
-			return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-				name, password, base.Host, base.Port, name)
-		},
-		logs: newLogCapture(),
+	env := &rotationEnv{logs: newLogCapture()}
+	// 비밀번호 비노출은 **시나리오마다** 검사한다. env별로 logCapture가 따로라 한 테스트에서
+	// 모아 보는 것은 불가능하고, 특히 오류 문자열을 싣는 secret_refresh_failed 경로((c))는
+	// 그 시나리오에서만 생긴다.
+	t.Cleanup(func() {
+		dump := env.logs.dump()
+		for _, secretValue := range []string{oldPassword, newPassword} {
+			if strings.Contains(dump, secretValue) {
+				t.Errorf("로그에 비밀번호가 들어 있다: %q", secretValue)
+			}
+		}
+	})
+
+	env.admin = admin
+	env.role = name
+	env.dsnFor = func(password string) string {
+		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+			name, password, base.Host, base.Port, name)
 	}
+	return env
 }
 
 // openPool은 운영과 같은 경계로 풀을 연다 — db.Open + secret provider.
@@ -382,9 +423,21 @@ func forceNewConnections(pool *sql.DB) {
 }
 
 // waitForQuery는 쿼리가 성공할 때까지 기다리고 from 기준 경과 시간을 돌려준다.
+//
+// ⚠️ 경과 시간을 **여기서 단언한다.** 기한은 "시도를 시작할 수 있는 시각"에만 걸리므로, 기한
+// 직전에 시작한 시도가 성공하면 쿼리 ctx(5초)만큼 더 걸려도 루프는 빠져나온다. 반환값을
+// 로그로만 쓰면 합격선이 사실상 +5초가 된다. 하한도 본다 — from 이전에 성공했다면 애초에
+// 28P01이 나지 않은 것이고, 그 실행은 자기 주장을 입증하지 못한다.
 func waitForQuery(t *testing.T, pool *sql.DB, budget time.Duration, from time.Time) time.Duration {
 	t.Helper()
-	return waitForQueryUntil(t, pool, from.Add(budget), from)
+	elapsed := waitForQueryUntil(t, pool, from.Add(budget), from)
+	if elapsed < 0 {
+		t.Errorf("기준 시각보다 %v 먼저 성공했다 — 회복 경로를 지나지 않았다", -elapsed)
+	}
+	if elapsed > budget {
+		t.Errorf("회복에 %v 걸렸다 — 합격선 %v를 넘었다", elapsed, budget)
+	}
+	return elapsed
 }
 
 func waitForQueryUntil(t *testing.T, pool *sql.DB, deadline, from time.Time) time.Duration {
@@ -608,22 +661,5 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-// 모든 시나리오가 끝난 뒤 한 번, 수집한 로그 전체에 비밀번호가 없는지 본다.
-func TestIntegrationLogsNeverContainPasswords(t *testing.T) {
-	env := newRotationEnv(t)
-	secret := &secretFixture{value: oldPassword}
-	pool := env.openPool(t, secret)
-
-	env.warmPool(t, pool)
-	env.rotate(t, newPassword)
-	secret.setValue(newPassword)
-	forceNewConnections(pool)
-	waitForQuery(t, pool, deadlineFromTSet, time.Now())
-
-	dump := env.logs.dump()
-	for _, secretValue := range []string{oldPassword, newPassword} {
-		if strings.Contains(dump, secretValue) {
-			t.Errorf("로그에 비밀번호가 들어 있다: %q", secretValue)
-		}
-	}
-}
+// 비밀번호 비노출 검사는 newRotationEnv의 t.Cleanup이 **모든 시나리오에** 건다.
+// 별도 테스트를 두면 그 시나리오 하나만 보게 되므로 두지 않는다.
