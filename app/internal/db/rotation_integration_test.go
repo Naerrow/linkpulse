@@ -9,9 +9,16 @@
 //
 // 실행 (DB는 사용자가 띄운다 — 가드레일):
 //
-//	docker compose up -d db
-//	LINKPULSE_IT_DSN='postgres://linkpulse:linkpulse@localhost:5432/linkpulse?sslmode=disable' \
+//	docker run -d --rm --name linkpulse-it-pg -e POSTGRES_PASSWORD=itpw \
+//	  -p 55432:5432 postgres:16-alpine
+//	LINKPULSE_IT_DSN='postgres://postgres:itpw@localhost:55432/postgres?sslmode=disable' \
 //	  go test -tags=integration -v -timeout 5m ./internal/db/
+//	docker stop linkpulse-it-pg
+//
+// ⚠️ **compose의 db 서비스를 쓰지 않는다.** 그 서비스에는 published port가 없어
+// (`docker compose port db 5432` → `:0`) 호스트의 5432로는 닿지 않는다. 그 주소로 붙이면
+// 호스트에 이미 떠 있는 **다른** Postgres에 연결되고, 이 테스트는 거기에 role과 데이터베이스를
+// 만든다. 그래서 비표준 포트(55432)의 일회용 컨테이너를 쓴다 — plan 2-4의 "disposable"이 이 뜻이다.
 //
 // 기본 `go test ./...`에서는 build tag로 제외된다 — CI에 Postgres가 없고, 이 테스트는
 // **사람이 돌리는 배포 게이트**이지 PR 검사가 아니다(plan 2-4: "[사람] 통합 테스트").
@@ -283,6 +290,11 @@ func newRotationEnv(t *testing.T) *rotationEnv {
 	base, err := pgx.ParseConfig(adminDSN)
 	if err != nil {
 		t.Fatalf("LINKPULSE_IT_DSN 파싱 실패: %v", err)
+	}
+	// 이 테스트는 role과 데이터베이스를 **만들고 지운다.** 원격 호스트(RDS 등)를 가리키면
+	// 그 서버에 흔적을 남기므로 로컬만 허용한다. 실수로 운영 DSN을 넣는 경로를 여기서 끊는다.
+	if base.Host != "localhost" && base.Host != "127.0.0.1" && !strings.HasPrefix(base.Host, "/") {
+		t.Fatalf("LINKPULSE_IT_DSN의 호스트가 로컬이 아니다(%s) — 이 테스트는 role·DB를 생성한다", base.Host)
 	}
 
 	// 테스트마다 고유한 이름이라 병렬·반복 실행에서 충돌하지 않는다.

@@ -57,7 +57,11 @@ aws sso login
 ```
 aws: [ERROR]: Unknown options: target, 0개면, 원문을, 못, 받는다, #
 ```
-붙여넣은 명령 뒤의 `# 설명`이 그대로 인자가 됐다.
+붙여넣은 명령 뒤의 `# 설명`이 그대로 인자가 됐다. 주석에 괄호가 있으면 메시지가 달라진다 —
+zsh가 `(...)`를 **glob qualifier**로 읽기 때문이다. 같은 원인이니 같은 칸에서 찾는다.
+```
+zsh: unknown file attribute: ^-      # docker compose stop db   (포트 미노출)
+```
 
 **원인** — zsh **대화형 셸**은 기본적으로 `#`을 주석으로 보지 않는다(`INTERACTIVE_COMMENTS` 미설정).
 bash와 다르고, 스크립트 파일로 실행할 때와도 다르다.
@@ -73,6 +77,12 @@ setopt interactive_comments        # 이 셸에서만. ~/.zshrc에 넣으면 영
 실제로 2026-09-09 1-3 검증에서 *"광역 rule target 확인"* 한 줄이 이렇게 누락됐다
 (target이 0개면 회전 원문을 한 건도 못 받는 항목이었다).
 → **여러 명령을 붙여넣었으면 출력 개수가 명령 개수와 맞는지 센다.**
+
+**같은 모양의 재발 (2-4 통합 테스트 실행)** — 블록 중간의 `cd app`이 *"이미 `app/`에 있어서"*
+실패했고, `cd app && go test ...`가 `&&`로 묶여 있어 **게이트 테스트가 아예 실행되지 않았다.**
+그런데 앞뒤 명령(`docker run`, `docker stop`)은 정상 출력을 내서 블록 전체가 돈 것처럼 보였다.
+→ **상대 경로 `cd`를 블록 안에 넣지 않는다.** 저장소 루트를 절대경로로 한 번 잡거나
+`go test -C app ...`처럼 **명령 자체에 디렉터리를 준다.**
 
 ---
 
@@ -144,3 +154,44 @@ git status -sb | head -1
 
 **교훈(G-5와 같다)** — 검증 명령 자체가 틀리면 검증은 통과처럼 보인다.
 **빈 출력을 "이상 없음"으로 읽지 않는다.** 기대한 값이 나왔는지를 본다.
+
+---
+
+## G-7. 통합 테스트가 compose가 아닌 **호스트의 다른 Postgres**에 붙었다
+
+**증상** — `docker compose up -d db`로 DB를 띄우고 `localhost:5432`로 통합 테스트를 돌렸는데
+연결 자체가 인증 실패한다. DB 컨테이너는 분명히 `Started`이고 healthcheck도 통과한다.
+```
+관리 연결 핑 실패: failed SASL auth: FATAL: password authentication failed
+for user "linkpulse" (SQLSTATE 28P01)
+```
+
+**원인** — `docker-compose.yml`의 `db` 서비스에는 **`ports:`가 없다.** 컨테이너 내부 5432만 열려
+있고 호스트로는 publish되지 않는다(`app`만 `8080`을 매핑한다 — app은 compose 네트워크에서
+서비스명 `db`로 붙으므로 publish가 필요 없다). 따라서 `localhost:5432`는 **compose의 DB가 아니라
+호스트에 이미 떠 있던 다른 Postgres**다. 그쪽 `linkpulse` 비밀번호가 다르니 28P01이 난 것이다.
+
+```bash
+docker compose port db 5432     # :0  ← publish 안 됨. 매핑이 있으면 0.0.0.0:5432 가 나온다
+docker ps --format '{{.Names}}\t{{.Ports}}'   # 5432/tcp (→로 시작하는 매핑이 없다)
+```
+
+**해결** — 통합 테스트는 **비표준 포트의 일회용 컨테이너**를 쓴다. compose의 dev DB와 섞지 않는다.
+```bash
+docker run -d --rm --name linkpulse-it-pg -e POSTGRES_PASSWORD=itpw -p 55432:5432 postgres:16-alpine
+LINKPULSE_IT_DSN='postgres://postgres:itpw@localhost:55432/postgres?sslmode=disable' \
+  go test -tags=integration -v -timeout 5m ./internal/db/
+docker stop linkpulse-it-pg
+```
+
+**⚠️ 위험한 점 — 인증 실패가 오히려 다행이었다.** 이 테스트는 대상 서버에 `CREATE ROLE`과
+`CREATE DATABASE`를 한다. 비밀번호가 우연히 맞았다면 **남의 Postgres에 역할과 DB를 만들었을
+것이고**, 실패도 나지 않아 눈치채지 못했을 것이다.
+
+**재발 방지** — 두 겹으로 막았다.
+1. `rotation_integration_test.go`가 DSN 호스트를 검사해 `localhost`/`127.0.0.1`/유닉스 소켓이
+   아니면 즉시 중단한다(운영 RDS DSN을 실수로 넣는 경로를 끊는다).
+2. 포트를 5432가 아닌 **55432**로 둔다. 기본 포트를 피하면 "이미 떠 있던 무언가"에 붙지 않는다.
+
+**교훈** — `docker compose up -d db`가 성공했다는 것은 **컨테이너가 떴다**는 뜻이지
+**내가 그 컨테이너에 닿는다**는 뜻이 아니다. 접속 실패를 보면 서비스 상태보다 **포트 매핑**을 먼저 본다.
