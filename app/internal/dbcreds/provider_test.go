@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -210,6 +211,20 @@ func (c *logCapture) events() []map[string]any {
 		var m map[string]any
 		if json.Unmarshal([]byte(line), &m) == nil {
 			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// generations는 그 이벤트가 난 순서대로 generation 필드를 모은다.
+func (c *logCapture) generations(name string) []uint64 {
+	var out []uint64
+	for _, m := range c.events() {
+		if m["event"] != name {
+			continue
+		}
+		if g, ok := m["generation"].(float64); ok { // JSON 숫자는 float64로 들어온다
+			out = append(out, uint64(g))
 		}
 	}
 	return out
@@ -603,11 +618,29 @@ func TestAuthFailedObservedOncePerGeneration(t *testing.T) {
 		t.Fatalf("세대 3으로 회복하지 못했다: %v", err)
 	}
 
-	if n := cap.countEvent("auth_failed_observed"); n != 2 {
-		t.Errorf("auth_failed_observed %d회 — 세대가 바뀌었으니 2회여야 한다(⑮)", n)
+	// 건수만 보면 부족하다 — 2-6이 읽는 것은 "auth_failed_observed(N) → credential_recovered(N+1)"의
+	// **세대 값과 순서**다. 그 형태 그대로 고정한다.
+	if got := cap.generations("auth_failed_observed"); !slices.Equal(got, []uint64{1, 2}) {
+		t.Errorf("auth_failed_observed 세대 %v — [1 2]여야 한다(⑮)", got)
 	}
-	if n := cap.countEvent("credential_recovered"); n != 2 {
-		t.Errorf("credential_recovered %d회 — 세대 전이 2회만큼 나야 한다(⑫)", n)
+	if got := cap.generations("credential_recovered"); !slices.Equal(got, []uint64{2, 3}) {
+		t.Errorf("credential_recovered 세대 %v — [2 3]여야 한다(⑫)", got)
+	}
+}
+
+// 늦게 도착한 옛 세대의 실패는 auth_failed_observed를 **다시 찍지 않는다**(단조 비교).
+// `==`로 두면 세대 N 뒤에 온 N-1 실패가 로그를 되돌려, 2-6 판정표의
+// "세대·순서가 어긋남 = 확정 결함" 행이 잘못 걸린다(round-3 claude-ide#3 / r2 개선 2).
+func TestAuthFailedObservedIgnoresStaleGeneration(t *testing.T) {
+	cap, logger := newLogCapture()
+	p := New(oldPassword, nil, WithLogger(logger))
+	t.Cleanup(p.Close)
+
+	p.NoteAuthFailure(2)
+	p.NoteAuthFailure(1) // 늦게 도착한 옛 세대
+
+	if n := cap.countEvent("auth_failed_observed"); n != 1 {
+		t.Errorf("auth_failed_observed %d회 — 낡은 세대는 다시 찍지 않아야 한다", n)
 	}
 }
 
@@ -633,7 +666,7 @@ func TestCloseStopsRefresh(t *testing.T) {
 // 앱 종료 시 detached 작업이 최대 RefreshTimeout(10초) 동안 남아 있지 않다는 보장이 여기서 선다.
 func TestCloseCancelsInFlightRefresh(t *testing.T) {
 	f := &fakeFetch{value: newPassword, delay: 5 * time.Second}
-	p, _, _, _ := newTestSetup(t, f.fn)
+	p, _, _, cap := newTestSetup(t, f.fn)
 
 	ch := p.RequestRefresh(p.Current().Generation)
 	if ch == nil {
@@ -660,6 +693,10 @@ func TestCloseCancelsInFlightRefresh(t *testing.T) {
 	}
 	if p.Current().Generation != 1 {
 		t.Error("취소된 refresh가 세대를 올렸다")
+	}
+	// 종료로 인한 취소는 운영 신호가 아니다 — 알람·대시보드를 흐리지 않게 로그를 남기지 않는다.
+	if n := cap.countEvent("secret_refresh_failed"); n != 0 {
+		t.Errorf("secret_refresh_failed %d회 — 앱 종료 취소는 로그를 남기지 않아야 한다", n)
 	}
 }
 

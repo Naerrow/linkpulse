@@ -33,8 +33,10 @@ type Settings struct {
 	Provider *dbcreds.Provider
 }
 
-// defaultConnMaxLifetime은 Settings.ConnMaxLifetime이 0일 때 쓰는 값이다.
-const defaultConnMaxLifetime = 5 * time.Minute
+// DefaultConnMaxLifetime은 Settings.ConnMaxLifetime이 0일 때 쓰는 값이다.
+// **커넥션 수명 기본값의 단일 출처다** — config도 이 상수를 참조한다. 두 곳에 따로 두면
+// 한쪽만 바뀌었을 때 기동 로그 두 줄(logProviderMode·Open)이 서로 다른 "실효값"을 말한다.
+const DefaultConnMaxLifetime = 5 * time.Minute
 
 // Open은 설정으로 연결 풀을 만들고, DB가 준비될 때까지 핑을 재시도한 뒤 스키마를 멱등 적용한다.
 // 어느 단계든 실패하면 풀을 닫고 에러를 반환한다(기동 중단, fail-fast).
@@ -54,7 +56,7 @@ func Open(ctx context.Context, s Settings) (*sql.DB, error) {
 
 	lifetime := s.ConnMaxLifetime
 	if lifetime <= 0 {
-		lifetime = defaultConnMaxLifetime
+		lifetime = DefaultConnMaxLifetime
 	}
 
 	// 작은 서비스에 맞춘 보수적 풀 설정. 부하 테스트(P4) 결과에 따라 조정한다.

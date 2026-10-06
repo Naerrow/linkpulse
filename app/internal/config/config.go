@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Naerrow/linkpulse/app/internal/db"
 	"github.com/Naerrow/linkpulse/app/internal/dbcreds"
 )
 
@@ -21,11 +22,11 @@ const (
 	// 아래는 명백히 잘못된 설정을 막는 하한/상한이다.
 	minShortCodeLength = 4
 	maxShortCodeLength = 32
-
-	// 커넥션 최대 수명 기본값. 지금까지 db.go에 상수로 박혀 있던 값과 같다 —
-	// 환경변수를 안 넣으면 동작이 그대로다.
-	defaultConnMaxLifetime = 5 * time.Minute
 )
+
+// defaultConnMaxLifetime은 db 패키지의 값을 그대로 쓴다. 풀 설정의 주인이 그쪽이고,
+// 두 곳에 상수를 두면 한쪽만 바뀌었을 때 기동 로그가 서로 다른 실효값을 말한다.
+const defaultConnMaxLifetime = db.DefaultConnMaxLifetime
 
 // Config는 실행에 필요한 설정값 모음이다.
 type Config struct {
