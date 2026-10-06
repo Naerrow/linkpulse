@@ -139,6 +139,15 @@ func TestRotationRecoversAfterRepeatedFetchFailures(t *testing.T) {
 	secret.failNext(sdkFailuresK, newPassword)
 	forceNewConnections(pool)
 
+	// ⚠️ 재시도를 **누가 끌고 가는지**가 이 시나리오의 핵심이다.
+	// "포기하지 않는다"는 호출 수준이 아니라 provider 수준의 계약이다 — Connect 1회는 유한하게
+	// 실패하고 backoff 상태만 남으며, 재시도는 **다음 Connect가 승계**한다. 즉 트래픽이 없으면
+	// 재시도도 없다(그 구간은 Step 1의 자동 재배포가 받는다). 그러므로 이 테스트는 신규 연결을
+	// 계속 만들어 줘야 한다. 그렇게 하지 않으면 조회가 0회로 끝나고, 멀쩡한 코드를
+	// "재시도가 멈췄다"고 오판한다.
+	stopTraffic := driveQueries(t, pool)
+	defer stopTraffic()
+
 	// 시계는 "마지막 주입 실패가 끝난 시각"부터다 — 그 전 구간은 이 plan이 통제하지 않는다.
 	secret.waitForFailures(t, sdkFailuresK)
 	tLastErr := secret.lastFailureAt()
@@ -162,7 +171,12 @@ func TestRotationRecoversAfterRepeatedFetchFailures(t *testing.T) {
 // 카나리만 도는 밤 시간대에는 영영 회복하지 못한다.
 func TestReadyzRecoversWithoutOtherTraffic(t *testing.T) {
 	env := newRotationEnv(t)
-	secret := &secretFixture{value: oldPassword}
+	// ⚠️ 조회를 일부러 느리게 만든다(1초 readiness 예산 < 2초 조회 < 3초 refresh 대기).
+	// 즉시 응답하는 fixture로는 회복이 **한 번의 /readyz 호출 안에서** 끝나 버려
+	// (실측: 643ms에 200) 정작 시험하려던 "옛 값 → detached refresh → **다음 호출**에서 200"
+	// 경로를 한 번도 지나지 않는다. 프로덕션의 Secrets Manager는 즉답하지 않으므로
+	// 느린 쪽이 실제에 가깝고, 무트래픽 회복이 성립하는지는 이 경로에서만 드러난다.
+	secret := &secretFixture{value: oldPassword, delay: 2 * time.Second}
 	pool := env.openPool(t, secret)
 
 	srv := httptest.NewServer(httpapi.NewRouter(httpapi.RouterDeps{
@@ -180,8 +194,10 @@ func TestReadyzRecoversWithoutOtherTraffic(t *testing.T) {
 	secret.setValue(newPassword)
 	forceNewConnections(pool)
 
-	// 회복까지 503이 몇 번 났는지 센다. 이 숫자가 런북에 적을 "회복 창" 실측값이다
-	// (추정이 아니라 실측 — plan 2-4가 이 값을 재는 유일한 자리로 지정했다).
+	// 회복까지 503이 몇 번 났는지 센다.
+	// ⚠️ 이 건수는 **주입한 조회 지연에 비례**하므로 프로덕션 값이 아니다. 여기서 고정하는 것은
+	// "503이 나다가 detached refresh가 끝난 뒤 200으로 돌아온다"는 **모양**이다.
+	// 프로덕션 건수는 실제 Secrets Manager 지연에 달려 있어 2-6에서만 나온다.
 	var unavailable int
 	deadline := tSet.Add(deadlineFromTSet)
 	for time.Now().Before(deadline) {
@@ -189,7 +205,7 @@ func TestReadyzRecoversWithoutOtherTraffic(t *testing.T) {
 			t.Logf("/readyz 회복: %v, 그동안 503 %d회 (프로브 간격 200ms)",
 				time.Since(tSet).Round(time.Millisecond), unavailable)
 			if unavailable == 0 {
-				t.Error("503이 한 번도 없었다 — 신규 연결이 강제되지 않아 경로를 시험하지 못했다")
+				t.Error("503이 한 번도 없었다 — 조회 지연보다 빨리 회복했다면 detached 승계 경로를 지나지 않았다")
 			}
 			return
 		}
@@ -389,6 +405,28 @@ func waitForQueryUntil(t *testing.T, pool *sql.DB, deadline, from time.Time) tim
 	return 0
 }
 
+// driveQueries는 신규 연결을 계속 만들어 "다음 Connect가 승계한다"를 성립시킨다.
+// 운영에서는 실사용 트래픽이나 카나리가 이 역할을 한다.
+func driveQueries(t *testing.T, pool *sql.DB) (stop func()) {
+	t.Helper()
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(100 * time.Millisecond):
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				var one int
+				_ = pool.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+				cancel()
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
+}
+
 func probeReadyz(t *testing.T, baseURL string) int {
 	t.Helper()
 	resp, err := http.Get(baseURL + "/readyz")
@@ -416,6 +454,7 @@ func assertNoGoroutineLeak(t *testing.T, before int) {
 // 전파 지연(구값 창)과 SDK 장애를 **주입**해 시나리오별 시계를 결정적으로 만든다.
 type secretFixture struct {
 	mu          sync.Mutex
+	delay       time.Duration // 조회 1회가 걸리는 시간. 0이면 즉답(프로덕션은 즉답하지 않는다)
 	value       string
 	pending     string    // visibleAt 이후 돌려줄 값
 	visibleAt   time.Time // 이 시각 전에는 value를 그대로 돌려준다
@@ -425,10 +464,22 @@ type secretFixture struct {
 	calls       int
 }
 
-func (f *secretFixture) fetch(context.Context) (string, error) {
+func (f *secretFixture) fetch(ctx context.Context) (string, error) {
+	f.mu.Lock()
+	delay := f.delay
+	f.calls++
+	f.mu.Unlock()
+
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls++
 
 	if f.failures > 0 {
 		f.failures--
