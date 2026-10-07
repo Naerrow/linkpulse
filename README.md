@@ -12,29 +12,34 @@ Built and operated as a production service, with a focus on reliability and obse
 
 ## 주요 기능
 
-- 긴 URL → 짧은 키 발급, 짧은 키 → 원본 리다이렉트
-- 클릭 이벤트 수집 및 분석(클릭 수, referrer, 시간대 등)
-- 읽기 위주 트래픽에 맞춘 캐싱
+- 긴 URL → 짧은 키 발급, 짧은 키 → 원본 리다이렉트(302 — 매 방문을 서버가 받아야 집계가 맞다)
+- 링크별 클릭 수 집계와 조회(`GET /api/links/{code}`)
+- IP별 레이트리밋(쓰기·통계·읽기 3단계)
+
+> 아직 없는 것: 유입 경로(referrer)·시간대 분석, Redis 캐시·분산 레이트리밋 — P5 이후.
 
 ## 아키텍처 (클라우드)
 
-사용자 → Route53 → ALB(HTTPS, ACM) → ECS Fargate(app) → RDS(PostgreSQL) / ElastiCache(Redis)
+사용자 → Route53 → ALB(HTTPS, ACM) → ECS Fargate(app, 태스크 2개) → RDS(PostgreSQL)
 모든 리소스는 Terraform으로 관리(IaC)되며, VPC의 퍼블릭/프라이빗 서브넷으로 분리되어 있습니다.
 
 - IaC: Terraform · 클라우드: AWS(ap-northeast-2)
 - 런타임: ECS Fargate · 인그레스: ALB + ACM
-- 데이터: RDS PostgreSQL · 캐시: ElastiCache Redis
+- 데이터: RDS PostgreSQL(마스터 비밀번호는 Secrets Manager가 7일마다 자동 회전)
 - CI/CD: GitHub Actions(빌드·테스트·ECR·롤링 배포)
 - 관측성: CloudWatch(구조화 로깅·지표·알람)
 
-> 진행 단계: 클라우드(ECS Fargate)에서 안정 운영 → EKS·홈랩(k3s) 하이브리드로 확장 예정.
+> 진행 단계: **P0~P4 완료(2026-10-07, Redis 캐시만 P5로 이관)** — 클라우드(ECS Fargate) 단독 운영 체계를 갖췄다.
+> 다음은 P5: EKS·ArgoCD·Prometheus/Grafana, 홈랩(k3s) 하이브리드.
 
 ## 운영 (operations)
 
-- 자동 배포: `main` 머지 시 GitHub Actions가 빌드·테스트 후 배포
-- 모니터링/알림: 핵심 지표(요청·오류율·지연·DB 커넥션)와 알람
-- 장애 대응 기록: 실제 장애와 대응 과정을 `/docs`에 회고로 정리
-- 백업: RDS 자동 백업 및 복원 리허설
+- 자동 배포: `main` 머지 시 GitHub Actions가 빌드·테스트 후 ECS 롤링 배포(OIDC, 장기 키 없음). 이전 이미지로의 롤백은 `workflow_dispatch` 한 번
+- 탐지: CloudWatch 알람(ALB 5xx·지연·ECS·RDS) + 외부 카나리(Route53 헬스체크가 `/readyz`를 30초마다 호출) → Slack·SMS
+- **비밀번호 회전 자동 복구**: 회전이 일어나면 앱이 새 비밀번호를 런타임에 다시 읽어 스스로 회복하고, 동시에 자동 재배포가 뒤를 받친다. 실측 503 약 61초, 사람 개입 없음([ADR 0006](docs/adr/0006-runtime-db-credentials.md)). 이전에는 회전마다 수 시간~수 일 다운됐다
+- 백업: RDS 자동 백업 + 복원 리허설([ADR 0005](docs/adr/0005-backup-restore-dr.md), [`rds-restore.md`](docs/runbooks/rds-restore.md))
+- 장애 대응: 알람별 런북([`alarm-response.md`](docs/runbooks/alarm-response.md)), 실제 장애·GameDay 회고([`docs/postmortems/`](docs/postmortems/))
+- 부하: k6로 한도 안 p95 10ms, 한도 밖 429 보호, 클릭 집계 유실 0 확인([`load/k6/`](load/k6/))
 
 ## 로컬 실행
 
@@ -65,10 +70,11 @@ cd app && go run ./cmd/server
 
 ```
 /app    애플리케이션 + 테스트
-/infra  Terraform (VPC, ECS, ALB, RDS, ElastiCache, IAM)
+/infra  Terraform (VPC, ECS, ALB, RDS, IAM, 알람·카나리, 회전 자동 재배포 Lambda)
 /.github/workflows  CI/CD
-/docs   아키텍처 노트 · 장애 회고 · ADR
-/load   k6 부하 테스트
+/docs   ADR · 계획(plans) · 런북 · 장애 회고
+/load   k6 부하 테스트 · GameDay 장애 주입 이미지
+/scripts  prod 전체 재기동·삭제 스크립트
 ```
 
 ## 인프라 배포 (P1, Terraform)
