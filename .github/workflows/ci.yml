@@ -33,6 +33,12 @@ jobs:
       - name: 단위 테스트
         run: make test
 
+      # 통합 게이트(build tag: integration)는 CI에서 **실행하지 않는다** — Postgres가 없다.
+      # 대신 컴파일은 한다. 이게 없으면 배포 게이트 파일이 조용히 깨진 채 머지되고,
+      # 정작 필요할 때(2-4·2-6) 빌드 오류로 멈춘다. DB가 필요 없어 비용은 0이다.
+      - name: 통합 테스트 컴파일 검사
+        run: go vet -tags=integration ./...
+
       # rotation-redeploy Lambda의 handler 테스트. 별도 job으로 나누지 않는 이유는 러너 배정을
       # 1회로 유지하기 위해서다(2026-07-09 배포 실패 회고 — job이 늘면 실패 표면이 커진다).
       # 러너 기본 Python에 기대지 않고 Lambda 런타임과 같은 3.13으로 고정한다 — 버전이 다르면

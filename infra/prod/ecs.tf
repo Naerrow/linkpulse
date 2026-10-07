@@ -9,8 +9,13 @@ resource "aws_ecs_cluster" "main" {
   tags = { Name = "${local.name_prefix}-cluster" }
 }
 
+# skip_destroy: 새 revision을 등록할 때 이전 revision을 INACTIVE로 만들지 않는다.
+# Step 2가 task definition에 env를 추가하면 replacement가 일어나는데, 그때 이전 revision이
+# INACTIVE가 되면 롤백 대상이 사라진다(직전 ACTIVE revision을 다시 가리키는 것이 유일한 백스톱이다 —
+# Step 1의 force-new-deployment는 같은 이미지를 다시 띄울 뿐이라 코드 결함을 되돌리지 못한다).
 resource "aws_ecs_task_definition" "app" {
   family                   = "${local.name_prefix}-app"
+  skip_destroy             = true
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = var.task_cpu
@@ -46,6 +51,16 @@ resource "aws_ecs_task_definition" "app" {
         { name = "DB_NAME", value = aws_db_instance.main.db_name },
         { name = "DB_USER", value = aws_db_instance.main.username },
         { name = "DB_SSLMODE", value = "require" },
+
+        # P4(d)-2 Step 2 (plan 0009 2-2b). 둘 다 비밀이 아니다.
+        # DB_SECRET_ARN: 앱이 회전 후 현재 비밀번호를 다시 읽을 대상. SDK 리전의 source of
+        #   truth이기도 하다 — ECS Fargate는 Lambda와 달리 AWS_REGION을 자동 주입하지 않고
+        #   SDK v2에는 기본 리전이 없어서, ARN을 파싱해 얻은 리전을 WithRegion에 명시한다.
+        # AWS_REGION: SDK를 동작시키는 값이 아니라 배포 시점 교차검사다. task definition이
+        #   의도한 리전으로 만들어졌는지를 배포 전에 거른다(2-5의 게이트가 이 둘을 본다).
+        #   ARN의 리전과 다르면 앱이 기동 오류로 막는다.
+        { name = "DB_SECRET_ARN", value = local.rotation_secret_arn },
+        { name = "AWS_REGION", value = var.region },
       ]
 
       # 비밀번호만 Secrets Manager에서 주입(가드레일 #2). RDS 관리 시크릿의 password 키 참조.
