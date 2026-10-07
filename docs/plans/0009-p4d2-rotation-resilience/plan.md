@@ -15,7 +15,7 @@ created: 2026-08-24
 | 2-5 배포 | 인프라를 이 브랜치에서 재기동(빈 state → apply ①② 동시) → env 게이트 통과 → PR #20 머지 → 두 태스크 `secret_provider_mode=secret` |
 | 2-6 Step 2 실전 | ✅ 회전 전 태스크 **2개 모두** `auth_failed_observed(1) → secret_refreshed(1→2) → credential_recovered(2)`. 라벨 이동 후 **0~3초** 회복 |
 | 1-7 Step 1 | ✅ `redeploy_submitted` 1건(중복 없음), 롤아웃 `COMPLETED`까지 **3분 8초**(기준 10분) |
-| 서비스 영향 | 503 **약 61초**(44건) — 거의 전부 회전 Lambda 내부 구간(`T_set`→`T_label`). 09-07 드릴(Step 1만) **12분 34초** 대비 |
+| 서비스 영향 | 503 **약 61초**(44건) — 거의 전부 회전 Lambda 내부 구간(`T_set`→`T_label`). Step 1만 있던 09-09 드릴(1-6) **약 3분 49초**, 둘 다 없던 09-07 수동 대응 **12분 34초** 대비 |
 | 알람 | `canary_down` 발화 없음. `alb-target-5xx`는 ALARM 후 약 15분 유지 — CloudWatch 평가 범위 동작(오류 지속 아님, 런북에 기록) |
 | 30초 투입·회수 | 임시 브랜치에서 apply → 드릴 → main에서 다시 apply. 최종 `conn_max_lifetime=5m0s` 확인 |
 

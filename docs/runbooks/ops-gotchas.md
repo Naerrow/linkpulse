@@ -41,6 +41,10 @@ gh auth switch --user Naerrow && gh repo view --json viewerPermission
 # "ADMIN" 또는 "WRITE" 를 확인한 뒤에만 gh pr create / merge / comment
 ```
 
+**3차 발생 (2026-10-07, k6 PR)** — `GraphQL: must be a collaborator (createPullRequest)`. 메시지 모양은 달라도 같은 원인이다
+(활성 계정 `jaeheeparkpb`). 그날 앞선 PR 두 개는 `Naerrow`로 잘 만들어졌다 — **세션 중간에 활성 계정이 바뀔 수 있다.**
+→ 위 확인을 "세션 시작 때 한 번"이 아니라 **`gh` 쓰기 명령마다** 붙인다.
+
 ---
 
 ## G-2. `terraform init`/`plan`이 자격증명 만료로 실패
