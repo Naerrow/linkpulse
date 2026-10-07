@@ -1515,6 +1515,11 @@ main push가 자동 배포를 시작하므로 **앱 merge가 인프라보다 먼
 **작업 트리 상태를 단계마다 명시한다**(r8 codex-cli#4): apply ① 시점의 트리에는 **2-2a만** 반영돼 있고,
 apply ② 시점에는 **2-2b까지** 반영돼 있다. 임시 revert나 `-target`을 쓰지 않는다.
 
+> ⚠️ **1·2번은 Step 2 코드 검토 round-4에서 `apply-gate-2-5.md`로 대체됐다.** Terraform은 state의 revision
+> 하나만 deregister하고 서비스가 도는 revision은 CI가 등록한 것이라, ①을 먼저 하지 않아도 롤백 대상이
+> 사라지지 않는다(provider 6.52.0 소스 확인). 인프라를 내린 지금은 **이 브랜치에서 `full-apply-prod.sh`로
+> 재기동하는 것이 곧 ①②**다. 아래 1·2번은 기록으로 남긴다.
+
 1. **[사람] apply ① — 작업 트리에 `skip_destroy = true`만 있는 상태(2-2a)에서 apply.**
    **성공 기준은 "변경 0"이 아니다**(r4 codex-ide#5 — revision 4의 표현이 틀렸다). 현재 미설정 값의 기본이
    `false`이므로 **`false/null → true` in-place 반영**이 뜬다. 기준은 **task definition replacement가
@@ -1551,7 +1556,8 @@ apply ② 시점에는 **2-2b까지** 반영돼 있다. 임시 revert나 `-targe
    → **그대로 두면 30초 값이 라이브에 들어가지 않아 2-6이 다시 5분 경합을 타거나,
    실행자가 승인된 plan 밖에서 `register-task-definition`을 직접 설계해 drift를 만든다.**
    1. **HCL 수정** — `ecs.tf`의 `environment`에 `DB_CONN_MAX_LIFETIME = "30s"` 추가.
-   2. `terraform fmt` · `validate` · **`plan` 기대값: task definition `-/+`(새 revision 등록) · `0 destroy` ·
+   2. `terraform fmt` · `validate` · **`plan` 기대값: task definition `-/+`(새 revision 등록) — 요약은
+      `1 to add, 0 to change, 1 to destroy`이고 destroy 1건이 그 교체분이다(`skip_destroy`라 revision은 ACTIVE로 남는다) ·
       다른 리소스 변경 0.**
    3. **[사람] apply.**
    4. `aws ecs describe-task-definition`으로 **최신 ACTIVE의 `environment`에 `DB_CONN_MAX_LIFETIME=30s`** 확인.

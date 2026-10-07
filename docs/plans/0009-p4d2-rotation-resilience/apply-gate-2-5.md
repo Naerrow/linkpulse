@@ -1,89 +1,66 @@
-# 2-5 진입 게이트 — apply ①이 끝났는지 실측으로 가른다
+# 2-5 진입 — 인프라 재기동이 곧 apply ①②다
 
-> 이 문서는 **일회성 판정 절차**다. 2-5가 끝나면 지운다.
-> 출처: Step 2 코드 검토 round-1 claude-ide #2(코드로 닫을 수 없어 게이트로 올린 유일한 지적).
+> 이 문서는 **일회성 절차**다. 2-5가 끝나면 지운다.
+> 출처: Step 2 코드 검토 round-1 claude-ide #2(apply ① 기록 공백) → round-4에서 전제를 다시 확인해 단순화했다.
 
-## 왜 필요한가
+## 왜 "apply ① 먼저" 게이트를 없앴나
 
-plan 2-2는 HCL 작성을 둘로 쪼갰다.
+옛 게이트는 *"2-2a(`skip_destroy`)를 먼저 apply하지 않으면 task definition 교체 때 직전 revision이
+INACTIVE가 돼 롤백 대상이 사라진다"*는 전제였다. **이 저장소의 배포 구조에서는 그 일이 일어나지 않는다.**
 
-- **2-2a** = `aws_ecs_task_definition.app`에 **`skip_destroy = true`만** → apply ①의 기대값은
-  **in-place(`false/null → true`) · replacement 없음 · `0 destroy`**
-- **2-2b** = task role 정책 + `DB_SECRET_ARN`·`AWS_REGION` env → task definition **`-/+`**(새 revision)
+- **Terraform은 state의 revision 하나만 deregister한다.** AWS provider 6.52.0
+  `internal/service/ecs/task_definition.go`의 Read·Delete가 state의 `arn`만 다룬다(`track_latest` 미사용).
+- **서비스가 실제로 도는 revision은 항상 CI가 등록한 것이다.** `deploy.yml`이 최신 ACTIVE를 base로
+  새 revision을 등록하고, `ecs.tf`의 service는 `ignore_changes = [task_definition]`이다.
+  → CI revision은 Terraform state에 들어가지 않으므로 Terraform이 지울 수 없다.
+- Terraform state의 revision은 이미지가 `:bootstrap`/`:v1`이다. 복구 후 ECR에는 없는 태그라
+  애초에 롤백 대상이 아니다. **롤백은 이전 이미지로의 CI 재배포**다(아래 "롤백").
 
-쪼갠 이유는 *"모든 HCL 변경이 이미 작업 트리에 있으면 일반 `terraform apply`가 env replacement와
-정책까지 함께 적용하므로 그 게이트를 만족할 수 없다"*는 것이었다(r8 codex-cli#4).
+게다가 **지금은 인프라가 내려가 있어 state가 비어 있다.** 이 브랜치에서 새로 만들면 교체(destroy)가
+일어날 대상 자체가 없으므로, 재기동 한 번이 apply ①과 ②를 동시에 끝낸다.
 
-**그런데 이 브랜치에는 2-2a(`3f8667a`)와 2-2b(`5ae7a11`)가 둘 다 있다.** 두 커밋 사이에 ~15시간이
-있어 apply ①이 그사이 끝났을 수도 있지만 **저장소에 기록이 없다.**
+## 절차 (B 단계 AWS 창의 첫 순서)
 
-⚠️ **왜 그냥 넘기면 안 되나.** Terraform의 destroy 단계는 **prior state**를 근거로 판정한다.
-2-2a가 apply되지 않은 상태에서 두 변경을 한 번에 apply하면, replacement의 destroy가
-`skip_destroy = false`(prior state)로 판정돼 **직전 revision이 INACTIVE가 될 여지**가 있다.
-그러면 `ecs.tf:12-15`가 막으려던 바로 그 일이 일어난다 — **롤백 대상이 사라진다.**
-Step 1의 `force-new-deployment`는 같은 이미지를 다시 띄울 뿐이라 코드 결함을 되돌리지 못하므로,
-**직전 ACTIVE revision이 Step 2의 유일한 백스톱**이다.
-
-리뷰어도 자격증명이 없어 단정하지 않았다. **실측으로 가른다.**
-
-## 절차 (B 단계 AWS 창의 **첫 순서**)
-
-### 0. 롤백 대상을 먼저 적어 둔다 [read-only]
+### 1. 이 브랜치에서 인프라를 다시 만든다
 
 ```bash
-aws ecs list-task-definitions --family-prefix linkpulse-prod-app --status ACTIVE \
-  --region ap-northeast-2 --query 'taskDefinitionArns[-3:]' --output table
+git switch feat/p4d2-secret-provider && git pull
+./scripts/full-apply-prod.sh --trigger-deploy
 ```
 
-여기 나온 revision이 백스톱이다. **판정 전후로 이 목록이 줄어들면 안 된다.**
+스크립트가 두 번 확인을 묻는다. **입력 전에 plan 출력을 본다.**
 
-### 1. state에 `skip_destroy`가 이미 들어갔는지 본다 [read-only]
+| 스크립트 단계 | 기대 plan | 다르면 |
+| --- | --- | --- |
+| Step 1/4 (`apply linkpulse prod`) | `0 to change, 0 to destroy`(전부 신규). 신규 목록에 `aws_iam_role_policy.ecs_task_secrets`가 있다 | 멈춘다 — state가 비어 있지 않다는 뜻이다 |
+| Step 3/4 (`scale linkpulse prod`) | `aws_ecs_task_definition.app` **교체 1건**(이미지 태그 `bootstrap → v1`) + in-place 2건(`aws_ecs_service.app`의 desired count, 그 값을 임계로 쓰는 `monitoring.tf` 알람). `1 to destroy`는 그 교체분이다 | destroy 대상이 task definition이 아니면 멈춘다 |
+
+- Step 2/4의 배포는 **main 이미지**다(`--ref main`). 이 이미지는 `DB_SECRET_ARN`·`AWS_REGION`을
+  읽지 않으므로 env가 미리 들어가 있어도 평소처럼 뜬다. Step 2 코드는 머지 때 들어간다.
+- Step 3/4의 교체는 `skip_destroy = true`라 옛 revision이 ACTIVE로 남는다. 무해하다.
+
+### 2. 머지 전 env 게이트 (plan 2-5 3번)
 
 ```bash
-terraform -chdir=infra/prod state show aws_ecs_task_definition.app | grep -E 'skip_destroy|revision'
+aws ecs describe-task-definition --task-definition linkpulse-prod-app --region ap-northeast-2 \
+  --query 'taskDefinition.containerDefinitions[0].environment[?name==`DB_SECRET_ARN` || name==`AWS_REGION`]' \
+  --output table
 ```
 
-### 2. 현재 트리로 plan을 찍는다 [read-only]
+두 값이 다 있고 `DB_SECRET_ARN`의 리전이 `ap-northeast-2`면 통과. 하나라도 없으면 머지하지 않는다.
+
+### 3. PR #20 정리 후 머지
+
+- PR 본문의 `- [ ] apply ① 실행 기록` 체크박스를 닫고, 근거로 *"빈 state에서 브랜치 HCL로 재기동(apply ①② 동시)"*
+  한 줄과 Step 1/4의 `Plan:` 줄만 붙인다. **전체 plan 출력은 붙이지 않는다** — 공개 저장소라 계정 ID·ARN이 들어간다.
+- 머지하면 CI가 Step 2 이미지를 배포한다. 이후는 plan 2-5의 5번(smoke + `secret_provider_mode=secret` 로그)부터.
+
+## 롤백
+
+Step 2 이미지가 깨지면 **머지 직전 main 커밋의 SHA**로 되돌린다(ECR은 최근 30개 이미지를 보존한다).
 
 ```bash
-terraform -chdir=infra/prod plan -no-color | tee /tmp/plan-2-5.txt
-grep -E '^  # |Plan: ' /tmp/plan-2-5.txt
+gh workflow run deploy.yml --ref main -f image_tag=<머지 직전 main SHA>
 ```
 
-## 판정표
-
-| state의 `skip_destroy` | plan 출력 | 판정 | 다음 |
-| --- | --- | --- | --- |
-| **`true`** | task definition `-/+`(새 revision) + task role 정책 신설, **`0 to destroy`** | ✅ **apply ①은 이미 끝났다** | plan **요약**을 PR에 첨부하고(아래 종료 조건) **apply ②로 간다** |
-| **`false`·없음** | 무엇이든 | ⛔ **apply ①이 안 끝났다** | 아래 (A)로 먼저 apply ①을 통과시킨다 |
-| `true` | **`1 to destroy` 이상** | ⛔ **중단** | destroy 대상이 무엇인지 확인. task definition이면 `skip_destroy`가 안 먹는 것이다 |
-
-### (A) apply ①을 뒤늦게 통과시키는 법 — 임시 revert 없이
-
-`3f8667a`는 **정확히 "2-2a까지만 반영된 트리"**다. 그 커밋을 별도 워크트리로 꺼내
-거기서 apply하면 plan이 금지한 임시 revert나 `-target` 없이 게이트를 그대로 만족한다.
-
-```bash
-git worktree add /tmp/apply1 3f8667a
-terraform -chdir=/tmp/apply1/infra/prod init
-terraform -chdir=/tmp/apply1/infra/prod plan -no-color | tee /tmp/plan-apply1.txt
-# 기대값: task definition in-place(false/null → true), replacement 없음, 0 to destroy
-# [사람] 확인 후에만:
-terraform -chdir=/tmp/apply1/infra/prod apply
-git worktree remove /tmp/apply1
-```
-
-⚠️ **워크트리의 state는 같은 원격 state다**(`backend.tf` 동일). 즉 여기서 apply하면 실제 인프라가
-바뀐다. plan 출력을 사람이 읽고 기대값과 일치할 때만 apply한다 — AGENTS.md 가드레일 #1.
-
-## 종료 조건
-
-- **요약만** PR #20에 첨부한다 — AGENTS.md §4가 모든 인프라 변경에 `terraform plan` 출력을 요구하지만,
-  **이 저장소는 PUBLIC이다.** 전체 출력에는 계정 ID·role/시크릿 ARN·RDS 엔드포인트가 들어 있고,
-  그것은 round-1 #4로 방금 걷어낸 값들이다.
-  ```bash
-  grep -E '^  # |^Plan: ' /tmp/plan-2-5.txt | sed -E 's/[0-9]{12}/<ACCOUNT_ID>/g'
-  ```
-  전체 파일은 로컬에 두고 필요하면 사람이 직접 확인한다.
-- 0번의 ACTIVE revision 목록이 **줄지 않았음**을 재확인한다.
-- PR 본문의 `- [ ] apply ① 실행 기록` 체크박스를 닫는다.
+이 경로는 최신 ACTIVE(두 env 포함)를 base로 옛 이미지를 다시 등록한다. 옛 이미지는 두 env를 무시하므로 그대로 뜬다.

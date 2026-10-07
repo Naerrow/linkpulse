@@ -60,19 +60,25 @@ context에 묶으면 Secrets Manager 호출이 **매번 1초에 잘려** 영영 
 그 안에서 무한히 돌면 opener를 점유해 연결 생성 경로 자체가 막힌다.
 
 대신 backoff 상태가 provider 전역에 남아 **다음 호출이 이어받는다.** 트래픽이 없으면 재시도도
-없지만, 운영에서 "트래픽 없음"은 존재하지 않는다 — ADR 0004의 카나리가 `/readyz`를 30초 주기로
+없지만, 카나리가 도는 한 "트래픽 없음"은 없다 — ADR 0004의 카나리가 `/readyz`를 30초 주기로
 상시 호출한다(§2가 detached를 정당화한 근거가 바로 그것이다).
 
 **Step 1과의 관계: 둘은 매 회전에 *동시에* 반응하는 중복 경로다.** Step 1의 트리거는
-`Secret Label Updated`뿐이고 Step 2의 상태를 보지 않는다. 그래서 정상 회전마다 Step 2가 수 초 안에
-먼저 회복시키고, **수 분 뒤 Step 1의 롤링이 이미 회복한 태스크를 교체한다.** 정상 동작이다 —
-회전마다 ECS 배포가 한 번 뜨는 것을 이상 징후로 읽지 않는다. (2-6의 판정이 시각 비교가 아니라
-"회전 전 task ID 집합"으로 설계된 이유도 이 중복 때문이다. Step 1의 롤링이 Step 2의 관측 창을 잘라 먹는다.)
+`Secret Label Updated`뿐이고 Step 2의 상태를 보지 않는다. **누가 먼저 회복시키는지는 `T_fail`이
+언제 오느냐가 정한다.** 신규 연결이 일찍 필요하면 Step 2가 `T_avail` 뒤 수 초 안에 회복하고, Step 1의
+롤링이 뒤따라 교체한다. 기존 세션만 재사용되면 Step 1의 롤링(약 2~3분)이 먼저 끝나 **Step 2 경로는 그
+회전에서 돌지 않을 수 있다**(커넥션 수명 기본 5분). 어느 쪽이든 회전마다 ECS 배포가 한 번 뜨는 것은
+정상이다. 2-6이 시각 비교 대신 회전 전 task ID로 판정하고 `DB_CONN_MAX_LIFETIME=30s`로 `T_fail`을
+당기는 이유가 이 경합이다.
 
-**백스톱은 한 방향뿐이다**: Step 1은 **태스크 쪽 조회 실패**(task role IAM 거부, 앱 SDK 타임아웃)를
-받아 준다. 그러나 Step 2의 **코드 결함**은 받지 못한다 — 같은 이미지를 다시 띄우기 때문이다.
-⚠️ **Secrets Manager 자체 장애는 둘 다 못 받는다.** Step 1도 라벨 확인을 선행 조건으로 두고,
-새 태스크는 execution role로 `DB_PASSWORD`를 주입받는다.
+**백스톱은 한 방향뿐이다.** 기준은 *"새 태스크 + execution role 주입으로 사라지는 실패인가"*다.
+Step 1은 **실행 중 프로세스의 task role에만 걸린 실패**(IAM 거부 등)와 **refresh 경로에만 있는 결함**을
+받아 준다 — 새 태스크는 env에서 현재 값을 seed로 받아 refresh가 필요 없다. 그러나 **모든 태스크가
+지나는 경로(dial·주입·기동)의 결함**은 받지 못한다 — 같은 이미지를 다시 띄우기 때문이다.
+일시적인 SDK 타임아웃은 Step 1 없이도 위의 backoff가 받는다.
+⚠️ **Secrets Manager 또는 태스크 서브넷에서 거기까지 가는 경로(NAT)의 장애는 둘 다 못 받는다.**
+Step 1도 라벨 확인을 선행 조건으로 두고, Fargate(1.4.0+)는 새 태스크의 `DB_PASSWORD`도 같은 태스크
+ENI로 주입받는다(VPC 엔드포인트가 없어 NAT로만 나간다).
 
 ### 4. **값이 바뀌지 않은** refresh는 세대를 올리지 않는다
 
@@ -82,7 +88,8 @@ context에 묶으면 Secrets Manager 호출이 **매번 1초에 잘려** 영영 
 
 실측(2회): 구값 창 20초 동안 조회 **13~15회**, 창이 끝난 뒤 **619ms~2.36초**에 회복.
 편차는 full jitter가 게이트 잔여를 0~5초에서 고르기 때문이고, 이론상 상한은
-**게이트 잔여(<5초) + 폴링 + dial ≈ 5.3초**다.
+**게이트 잔여(<5초) + 폴링 + dial ≈ 5.3초**다(통합 테스트의 200ms 폴링 기준). 프로덕션의 다음 자극은
+카나리 도착이라 이 값과 직접 비교하지 않는다 — 프로덕션 목표는 `T_avail` 이후 약 24초다.
 
 ### 5. 세대는 **조건부로만** 무효화한다
 
@@ -110,14 +117,16 @@ ECS Fargate는 Lambda와 달리 `AWS_REGION`을 자동 주입하지 않고, AWS 
 - **이 설계가 못 받는 구간이 있다.** `T_set`(DB 비밀번호 변경) → `T_label`(`AWSCURRENT` 이동)은
   회전 lambda 내부이고, `T_label` → `T_avail`(전파)에도 상한이 없다. 앱이 줄이는 것은
   `T_avail` 이후뿐이다. **"회전해도 무중단"이 아니라 "수 초 내 자동 회복"이다.**
-- **Step 1을 대체하지 않는다.** Step 2의 refresh가 **태스크 쪽 사유**(task role IAM 거부, SDK 타임아웃)로
+- **Step 1을 대체하지 않는다.** Step 2의 refresh가 **task role에만 걸린 사유**(IAM 거부 등)로
   실패하면 실행 중 태스크의 env는 이미 옛 비밀번호라 **폴백으로 복구되지 않는다.** 그 구간은 Step 1의
   재배포가 받는다(새 태스크는 execution role로 현재 값을 주입받는다).
-  반대로 **Step 2의 코드 결함은 Step 1이 못 받는다** — `force-new-deployment`는 같은 이미지를
-  다시 띄우므로 깨진 코드는 깨진 채 뜬다. 그래서 직전 ACTIVE task definition revision을
-  롤백 백스톱으로 보존한다(`skip_destroy = true`).
-  그리고 **Secrets Manager 자체 장애는 둘 다 못 받는다** — Step 1도 라벨 확인과 `DB_PASSWORD` 주입에
-  같은 서비스를 쓴다.
+  반대로 **모든 태스크가 지나는 경로의 코드 결함은 Step 1이 못 받는다** — `force-new-deployment`는
+  같은 이미지를 다시 띄우므로 깨진 코드는 깨진 채 뜬다. 그 백스톱은 **이전 이미지로의 CI 재배포**
+  (`workflow_dispatch`)다. 서비스가 도는 revision은 CI가 등록한 것이고 Terraform은 state의 revision
+  하나만 deregister하므로, task definition 교체가 롤백 대상을 지우지 않는다(`skip_destroy = true`는
+  비용이 없어 그대로 둔다).
+  그리고 **Secrets Manager 또는 거기까지 가는 경로(NAT)의 장애는 둘 다 못 받는다** — Step 1도 라벨
+  확인과 `DB_PASSWORD` 주입에 같은 서비스와 같은 태스크 ENI 경로를 쓴다.
 - **IAM은 시크릿 하나로 좁혔다.** task role에 대상 시크릿의 `GetSecretValue` 하나만 준다.
 
 ## 대안과 기각 사유

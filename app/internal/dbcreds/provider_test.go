@@ -636,6 +636,8 @@ func TestAuthFailedObservedIgnoresStaleGeneration(t *testing.T) {
 	p := New(oldPassword, nil, WithLogger(logger))
 	t.Cleanup(p.Close)
 
+	// 세대 2는 아직 전이하지 않은 세대다 — 단조 비교만 보려고 일부러 앞선 값을 쓴다.
+	// "현재보다 큰 세대 무시" 가드를 넣으면 이 테스트는 실제 전이(1→2) 뒤 2→1 순서로 바꿔야 한다.
 	p.NoteAuthFailure(2)
 	p.NoteAuthFailure(1) // 늦게 도착한 옛 세대
 
