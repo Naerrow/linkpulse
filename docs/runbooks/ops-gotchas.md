@@ -97,6 +97,12 @@ setopt interactive_comments        # 이 셸에서만. ~/.zshrc에 넣으면 영
 → **상대 경로 `cd`를 블록 안에 넣지 않는다.** 저장소 루트를 절대경로로 한 번 잡거나
 `go test -C app ...`처럼 **명령 자체에 디렉터리를 준다.**
 
+**재발 (2026-10-07, 30초 회수)** — 에이전트가 준 블록의 `terraform plan -out=… # 기대: …`가
+`Error: Too many command line arguments`로 실패했다. 그다음 줄 `apply`는 plan 파일이 없어 실패했지만,
+**마지막 줄 `gh workflow run deploy.yml`은 정상 실행돼** 회수 전 설정(30초)으로 배포가 한 번 헛돌았다.
+이미 G-3에 있는 함정인데 **명령을 건네는 쪽이 다시 만들었다.**
+→ **남에게 건네는 명령 블록에는 인라인 주석을 넣지 않는다.** 기대값은 블록 밖 문장으로 쓴다.
+
 ---
 
 ## G-4. `terraform plan`에 `2 to destroy` — 브랜치가 안 머지돼 있었다
@@ -208,3 +214,25 @@ docker stop linkpulse-it-pg
 
 **교훈** — `docker compose up -d db`가 성공했다는 것은 **컨테이너가 떴다**는 뜻이지
 **내가 그 컨테이너에 닿는다**는 뜻이 아니다. 접속 실패를 보면 서비스 상태보다 **포트 매핑**을 먼저 본다.
+
+---
+
+## G-8. `aws logs tail --since`가 빈 결과 — 배포가 범위보다 먼저 끝났다
+
+**증상** — 배포 뒤 기동 로그를 확인하려고 `aws logs tail … --since 10m | grep conn_max_lifetime`을 돌렸는데
+**아무것도 안 나온다.** 에러도 없다. 두 번 연속 같은 일이 났다(30분 범위도 한 번 빗나갔다).
+
+**원인** — 새 태스크의 기동 로그는 **배포가 끝난 시각이 아니라 태스크가 뜬 시각**에 찍힌다. 배포 완료를 기다렸다가
+확인하러 오면 그 사이 시간이 이미 `--since` 범위를 넘어 있다(이번엔 기동 01:08 → 조회 01:31).
+`grep`이 0줄이면 *"로그가 없다"*와 *"설정이 안 먹었다"*가 구별되지 않는다.
+
+**해결** — 범위를 넉넉히 잡고 마지막 줄만 본다.
+```bash
+aws logs tail /ecs/linkpulse-prod-app --region ap-northeast-2 --since 2h | grep conn_max_lifetime | tail -4
+```
+배포 시각은 `gh run list --workflow deploy.yml --limit 3`의 `updatedAt`으로 바로 확인된다.
+
+**같은 축 — 셸 변수는 터미널을 따라가지 않는다.** 회전 직전에 `T0=…`를 잡은 터미널이 아닌 새 창에서
+`--start-time "$T0"`을 쓰면 `invalid int value: ''`로 실패한다. 태스크별 로그 스트림을 조회할 때는
+`--start-time 0`이면 충분하다(스트림 자체가 그 태스크의 기동 이후다).
+
