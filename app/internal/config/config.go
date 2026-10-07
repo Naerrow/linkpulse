@@ -3,6 +3,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -52,6 +54,9 @@ type Config struct {
 	// 커넥션 최대 수명 (DB_CONN_MAX_LIFETIME). 2-6 검증 기간에만 짧게 넣어
 	// 신규 연결을 강제하고, 평시에는 미설정(기본 5분)이다.
 	ConnMaxLifetime time.Duration
+	// 관리자 토큰의 SHA-256 해시 (ADMIN_TOKEN_SHA256, 16진수 64자). 비어 있으면 nil이고
+	// 관리자 기능(링크 생성·요청 승인)이 꺼진다(plan 0011). 토큰 원문은 서버에 두지 않는다.
+	AdminTokenSHA256 []byte
 	// 잘못돼서 무시한 DB_CONN_MAX_LIFETIME 원문. 비어 있으면 정상이다.
 	// 값이 있으면 기동 로그가 그 사실을 함께 남긴다 — 이 경고를 Load 안에서 바로 찍으면
 	// 구조화 로거 설정 전이라 JSON도 task_id도 붙지 않는다.
@@ -120,6 +125,11 @@ func Load() (Config, error) {
 
 	connMaxLifetime, rejectedLifetime := resolveConnMaxLifetime()
 
+	adminHash, err := parseAdminTokenHash(os.Getenv("ADMIN_TOKEN_SHA256"))
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Port:            getEnv("APP_PORT", "8080"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
@@ -133,7 +143,23 @@ func Load() (Config, error) {
 		AWSRegion:               awsRegion,
 		ConnMaxLifetime:         connMaxLifetime,
 		ConnMaxLifetimeRejected: rejectedLifetime,
+		AdminTokenSHA256:        adminHash,
 	}, nil
+}
+
+// parseAdminTokenHash는 ADMIN_TOKEN_SHA256을 32바이트로 해석한다.
+// 빈 값은 "관리자 기능 끔"으로 받아들이지만, 값이 있는데 형식이 틀리면 기동을 막는다 —
+// 오타가 조용히 "관리자 기능 꺼짐"이 되면 왜 로그인이 안 되는지 찾기 어렵기 때문이다.
+func parseAdminTokenHash(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	b, err := hex.DecodeString(raw)
+	if err != nil || len(b) != sha256.Size {
+		return nil, errors.New("ADMIN_TOKEN_SHA256은 SHA-256 해시(16진수 64자)여야 합니다 — 토큰 원문을 넣지 않았는지 확인하세요")
+	}
+	return b, nil
 }
 
 // validateRotationEnv는 회전 대응 설정의 production 계약을 강제한다.

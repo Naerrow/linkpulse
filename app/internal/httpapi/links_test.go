@@ -18,7 +18,7 @@ import (
 func createLink(t *testing.T, router http.Handler, url string) linkResponse {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/links", strings.NewReader(`{"url":"`+url+`"}`))
+	req := asAdmin(httptest.NewRequest(http.MethodPost, "/api/links", strings.NewReader(`{"url":"`+url+`"}`)))
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d (body=%s)", rec.Code, http.StatusCreated, rec.Body.String())
@@ -53,7 +53,7 @@ func TestCreateLink(t *testing.T) {
 // TestCreateLinkInvalidJSON은 깨진 본문에 400을 돌려주는지 확인한다.
 func TestCreateLinkInvalidJSON(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/links", strings.NewReader("not json"))
+	req := asAdmin(httptest.NewRequest(http.MethodPost, "/api/links", strings.NewReader("not json")))
 	newTestRouter().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -63,7 +63,7 @@ func TestCreateLinkInvalidJSON(t *testing.T) {
 // TestCreateLinkInvalidURL은 허용되지 않는 스킴에 400을 돌려주는지 확인한다.
 func TestCreateLinkInvalidURL(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/links", strings.NewReader(`{"url":"ftp://example.com"}`))
+	req := asAdmin(httptest.NewRequest(http.MethodPost, "/api/links", strings.NewReader(`{"url":"ftp://example.com"}`)))
 	newTestRouter().ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
@@ -138,6 +138,12 @@ func (r failingRepo) Get(context.Context, string) (links.Link, error) {
 
 func (r failingRepo) IncrementClicks(context.Context, string) error { return r.err }
 
+func (r failingRepo) SetDisabled(context.Context, string, bool) (links.Link, error) {
+	return links.Link{}, r.err
+}
+
+func (r failingRepo) ListRecent(context.Context, int) ([]links.Link, error) { return nil, r.err }
+
 // TestRedirectRepositoryFailureLogsCause는 저장소 장애(ErrNotFound가 아닌 오류)일 때
 // 500을 돌려주면서 원인 에러를 로그에 남기는지 확인한다.
 // 원인이 로그에 없으면 운영 중 쌓이는 500이 "없는 링크"인지 "DB 장애"인지 구분할 수 없다.
@@ -163,5 +169,52 @@ func TestRedirectRepositoryFailureLogsCause(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), cause) {
 		t.Errorf("원인 에러가 로그에 없음: %s", buf.String())
+	}
+}
+
+// TestDisableLinkFlow는 운영자가 링크를 중단하면 410이 되고, 다시 켜면 302로 돌아오는지 본다(plan 0011).
+func TestDisableLinkFlow(t *testing.T) {
+	router := newTestRouter()
+	link := createLink(t, router, "https://example.com/stop-me")
+
+	if rec := do(router, httptest.NewRequest(http.MethodPost, "/api/admin/links/"+link.Code+"/disable", nil)); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("토큰 없는 중단 status = %d, want 401", rec.Code)
+	}
+	if rec := do(router, asAdmin(httptest.NewRequest(http.MethodPost, "/api/admin/links/"+link.Code+"/disable", nil))); rec.Code != http.StatusOK {
+		t.Fatalf("중단 status = %d", rec.Code)
+	}
+
+	rec := do(router, httptest.NewRequest(http.MethodGet, "/"+link.Code, nil))
+	var e errorResponse
+	decode(t, rec, &e)
+	if rec.Code != http.StatusGone || e.Error.Code != "link_disabled" {
+		t.Errorf("중단된 링크 = %d %q, want 410 link_disabled", rec.Code, e.Error.Code)
+	}
+
+	rec = do(router, httptest.NewRequest(http.MethodGet, "/api/links/"+link.Code, nil))
+	var stats linkResponse
+	decode(t, rec, &stats)
+	if !stats.Disabled || stats.Clicks != 0 {
+		t.Errorf("통계 = %+v, disabled=true·clicks=0이어야 한다", stats)
+	}
+
+	rec = do(router, asAdmin(httptest.NewRequest(http.MethodGet, "/api/admin/links", nil)))
+	var list recentLinksResponse
+	decode(t, rec, &list)
+	if len(list.Links) != 1 || !list.Links[0].Disabled {
+		t.Errorf("운영자 목록 = %+v", list)
+	}
+
+	if rec := do(router, asAdmin(httptest.NewRequest(http.MethodPost, "/api/admin/links/"+link.Code+"/enable", nil))); rec.Code != http.StatusOK {
+		t.Fatalf("재개 status = %d", rec.Code)
+	}
+	if rec := do(router, httptest.NewRequest(http.MethodGet, "/"+link.Code, nil)); rec.Code != http.StatusFound {
+		t.Errorf("재개 뒤 status = %d, want 302", rec.Code)
+	}
+	if rec := do(router, asAdmin(httptest.NewRequest(http.MethodPost, "/api/admin/links/nope123/disable", nil))); rec.Code != http.StatusNotFound {
+		t.Errorf("없는 코드 중단 status = %d, want 404", rec.Code)
+	}
+	if rec := do(router, httptest.NewRequest(http.MethodGet, "/api/admin/links", nil)); rec.Code != http.StatusUnauthorized {
+		t.Errorf("토큰 없는 목록 status = %d, want 401", rec.Code)
 	}
 }

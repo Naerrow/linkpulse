@@ -16,6 +16,8 @@ var (
 	ErrCodeExists = errors.New("이미 존재하는 코드")
 	// ErrCodeExhausted는 재시도 한도 안에 빈 코드를 찾지 못했을 때 반환된다(사실상 키공간 포화).
 	ErrCodeExhausted = errors.New("사용 가능한 코드를 발급하지 못함")
+	// ErrLinkDisabled는 운영자가 중단한 링크로 리다이렉트하려 할 때 반환된다.
+	ErrLinkDisabled = errors.New("중단된 링크")
 )
 
 // Repository는 링크 저장소 추상화다.
@@ -32,4 +34,8 @@ type Repository interface {
 	Get(ctx context.Context, code string) (Link, error)
 	// IncrementClicks는 코드의 클릭 수를 1 늘린다. 없으면 ErrNotFound.
 	IncrementClicks(ctx context.Context, code string) error
+	// SetDisabled는 링크를 중단하거나(true) 다시 켠다(false). 없으면 ErrNotFound.
+	SetDisabled(ctx context.Context, code string, disabled bool) (Link, error)
+	// ListRecent는 링크를 최근 생성순으로 최대 limit건 돌려준다(운영자 화면용).
+	ListRecent(ctx context.Context, limit int) ([]Link, error)
 }

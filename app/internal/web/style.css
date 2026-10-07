@@ -1,0 +1,142 @@
+/* linkpulse 화면(plan 0011). 한 열 레이아웃이라 휴대폰에서도 그대로 쓴다. */
+:root {
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1c1f24;
+  --muted: #5f6672;
+  --line: #d9dde3;
+  --accent: #2f6fde;
+  --accent-text: #ffffff;
+  --error: #c0392b;
+  --ok: #1e8449;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a;
+    --card: #1e2125;
+    --text: #e8eaed;
+    --muted: #a0a7b1;
+    --line: #353a41;
+    --accent: #5b8ff0;
+    --accent-text: #0d1117;
+    --error: #ef7b6c;
+    --ok: #58c27d;
+    color-scheme: dark;
+  }
+}
+
+[hidden] { display: none !important; }
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+}
+
+h1 { margin: 0; font-size: 1.75rem; }
+h2 { margin: 0 0 0.75rem; font-size: 1.15rem; }
+h3 { margin: 1.5rem 0 0.5rem; font-size: 1rem; }
+.lead { margin: 0.25rem 0 1.5rem; color: var(--muted); }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+
+summary { cursor: pointer; font-weight: 600; }
+
+label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.9rem; color: var(--muted); }
+
+input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+button {
+  margin-top: 0.75rem;
+  padding: 0.55rem 1rem;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--line);
+}
+
+button:disabled { opacity: 0.5; cursor: default; }
+
+.inline, .copy-row { display: flex; gap: 0.5rem; align-items: center; }
+.inline input, .copy-row input { flex: 1; min-width: 0; }
+.inline button, .copy-row button { margin-top: 0; flex-shrink: 0; }
+.copy-row { margin: 0.75rem 0; }
+
+.home { color: inherit; text-decoration: none; }
+.steps { margin: 0 0 0.5rem; padding-left: 1.25rem; }
+.steps li { margin: 0.25rem 0; }
+.hint { color: var(--muted); font-size: 0.9rem; }
+.notice {
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent);
+}
+a { color: var(--accent); }
+
+.error { color: var(--error); }
+.ok { color: var(--ok); }
+.status { font-weight: 600; }
+.break { overflow-wrap: anywhere; }
+
+dl { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 0.75rem; margin: 0.75rem 0; }
+dt { color: var(--muted); }
+dd { margin: 0; }
+
+#pending-list { list-style: none; padding: 0; margin: 0.75rem 0 0; }
+.pending { border-top: 1px solid var(--line); padding: 0.75rem 0; }
+.pending-url { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+.pending-note, .pending-meta { color: var(--muted); font-size: 0.9rem; }
+.pending-actions { display: flex; gap: 0.5rem; }
+.pending-message { margin: 0.5rem 0 0; font-weight: 600; }
+.link-short { font-weight: 600; overflow-wrap: anywhere; }
+.link-url { color: var(--muted); font-size: 0.9rem; }
+li[data-disabled="1"] .link-short { text-decoration: line-through; color: var(--muted); }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 30rem) {
+  .inline { flex-direction: column; align-items: stretch; }
+  .inline button { width: 100%; }
+}

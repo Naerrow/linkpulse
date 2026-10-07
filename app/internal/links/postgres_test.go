@@ -36,7 +36,22 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		t.Fatalf("스키마 준비 실패: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `TRUNCATE links`); err != nil {
+	if _, err := db.ExecContext(ctx, `ALTER TABLE links ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ`); err != nil {
+		t.Fatalf("disabled_at 열 준비 실패: %v", err)
+	}
+	// link_requests가 links를 참조하므로 함께 만들고 함께 비운다(참조된 테이블만 TRUNCATE하면 실패한다).
+	const requestSchema = `CREATE TABLE IF NOT EXISTS link_requests (
+		id TEXT PRIMARY KEY,
+		url TEXT NOT NULL,
+		note TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+		code TEXT REFERENCES links (code),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		decided_at TIMESTAMPTZ)`
+	if _, err := db.ExecContext(ctx, requestSchema); err != nil {
+		t.Fatalf("요청 스키마 준비 실패: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `TRUNCATE link_requests, links`); err != nil {
 		t.Fatalf("TRUNCATE 실패: %v", err)
 	}
 	return db
@@ -107,5 +122,40 @@ func TestPostgresIncrementClicks(t *testing.T) {
 	}
 	if err := repo.IncrementClicks(ctx, "missing"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("없는 코드 IncrementClicks err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestPostgresSetDisabledAndListRecent는 중단·재개와 최근 목록을 확인한다(plan 0011).
+func TestPostgresSetDisabledAndListRecent(t *testing.T) {
+	repo := NewPostgresRepository(newTestDB(t))
+	ctx := context.Background()
+
+	if _, err := repo.Create(ctx, "keep001", "https://example.com/keep"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Create(ctx, "stop001", "https://example.com/stop"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := repo.SetDisabled(ctx, "stop001", true)
+	if err != nil || !first.Disabled() {
+		t.Fatalf("SetDisabled(true) = %+v, %v", first, err)
+	}
+	again, _ := repo.SetDisabled(ctx, "stop001", true)
+	if !again.DisabledAt.Equal(first.DisabledAt) {
+		t.Errorf("재중단이 시각을 바꿈: %v → %v", first.DisabledAt, again.DisabledAt)
+	}
+	got, err := repo.Get(ctx, "stop001")
+	if err != nil || !got.Disabled() {
+		t.Errorf("Get = %+v, %v — 중단 상태가 저장되지 않음", got, err)
+	}
+	if back, err := repo.SetDisabled(ctx, "stop001", false); err != nil || back.Disabled() {
+		t.Errorf("SetDisabled(false) = %+v, %v", back, err)
+	}
+	if _, err := repo.SetDisabled(ctx, "missing", true); !errors.Is(err, ErrNotFound) {
+		t.Errorf("없는 코드 err = %v, want ErrNotFound", err)
+	}
+	list, err := repo.ListRecent(ctx, 10)
+	if err != nil || len(list) != 2 {
+		t.Errorf("ListRecent = %d건, %v, want 2", len(list), err)
 	}
 }

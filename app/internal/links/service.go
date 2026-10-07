@@ -61,6 +61,10 @@ func (s *Service) Resolve(ctx context.Context, code string) (Link, error) {
 	if err != nil {
 		return Link{}, err
 	}
+	// 중단된 링크는 이동시키지 않고 클릭으로 세지도 않는다.
+	if link.Disabled() {
+		return Link{}, ErrLinkDisabled
+	}
 	if err := s.repo.IncrementClicks(ctx, code); err != nil {
 		slog.Error("클릭 집계 실패", "code", code, "error", err)
 	}
@@ -70,6 +74,19 @@ func (s *Service) Resolve(ctx context.Context, code string) (Link, error) {
 // Stats는 클릭 수를 포함한 링크 현황을 조회한다(집계하지 않는 순수 조회).
 func (s *Service) Stats(ctx context.Context, code string) (Link, error) {
 	return s.repo.Get(ctx, code)
+}
+
+// recentListLimit은 운영자 화면의 링크 목록 건수다.
+const recentListLimit = 50
+
+// SetDisabled는 운영자가 링크를 중단하거나 다시 켠다. 지우지 않으므로 클릭 기록이 남는다.
+func (s *Service) SetDisabled(ctx context.Context, code string, disabled bool) (Link, error) {
+	return s.repo.SetDisabled(ctx, code, disabled)
+}
+
+// ListRecent는 운영자 화면에 보여 줄 최근 링크 목록이다.
+func (s *Service) ListRecent(ctx context.Context) ([]Link, error) {
+	return s.repo.ListRecent(ctx, recentListLimit)
 }
 
 // normalizeURL은 입력 URL을 검증하고 정규화한다.

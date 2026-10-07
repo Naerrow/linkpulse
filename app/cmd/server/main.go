@@ -52,7 +52,7 @@ func main() {
 
 	// 저장소 → 서비스 → 라우터 순으로 의존성을 조립한다.
 	// DATABASE_URL이 있으면 Postgres를, 없으면 인메모리(재시작 시 데이터 소실)를 쓴다.
-	var repo links.Repository
+	var repo links.Store
 	var readiness func(context.Context) error
 	if cfg.DatabaseURL != "" {
 		// DB_SECRET_ARN이 있으면 회전 대응 provider를 붙인다. 없으면 정적 모드다(로컬).
@@ -88,11 +88,16 @@ func main() {
 		repo = links.NewMemoryRepository()
 	}
 	linkSvc := links.NewService(repo, cfg.ShortCodeLength)
+	// 같은 저장소가 요청도 맡는다 — 승인이 링크와 요청을 한 트랜잭션으로 바꿔야 해서다.
+	reqSvc := links.NewRequestService(repo, cfg.ShortCodeLength)
+	slog.Info("관리자 기능", "admin_enabled", cfg.AdminTokenSHA256 != nil)
 
 	handler := httpapi.NewRouter(httpapi.RouterDeps{
-		Links:     linkSvc,
-		BaseURL:   cfg.PublicBaseURL,
-		Readiness: readiness,
+		Links:            linkSvc,
+		Requests:         reqSvc,
+		AdminTokenSHA256: cfg.AdminTokenSHA256,
+		BaseURL:          cfg.PublicBaseURL,
+		Readiness:        readiness,
 		// RateLimit 미지정 = zero-value → 운영 기본값 적용(httpapi/ratelimit.go의 default* 상수).
 	})
 	srv := newServer(cfg, handler)

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -23,7 +24,7 @@ func requestLogger(next http.Handler) http.Handler {
 		next.ServeHTTP(sw, r)
 		slog.Info("http request",
 			"method", r.Method,
-			"path", r.URL.Path,
+			"path", logPath(r.URL.Path),
 			"status", sw.status,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
@@ -59,4 +60,22 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.wroteHeader = true
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// logPath는 로그에 남길 경로를 만든다. 요청 ID는 요청 확인 링크의 열쇠라 로그에서 가린다(plan 0011).
+//
+//	/api/requests/<id>                 → /api/requests/{id}
+//	/api/admin/requests/<id>/approve   → /api/admin/requests/{id}/approve
+func logPath(p string) string {
+	for _, prefix := range []string{"/api/requests/", "/api/admin/requests/"} {
+		rest, ok := strings.CutPrefix(p, prefix)
+		if !ok || rest == "" {
+			continue
+		}
+		if _, action, found := strings.Cut(rest, "/"); found {
+			return prefix + "{id}/" + action
+		}
+		return prefix + "{id}"
+	}
+	return p
 }

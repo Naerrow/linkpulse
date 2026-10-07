@@ -51,12 +51,20 @@ export const options = {
 };
 
 export function setup() {
+  // 링크 생성은 관리자만 한다(plan 0011). 토큰은 실행할 때 env로만 넘긴다 — 파일에 두지 않는다.
+  const token = __ENV.ADMIN_TOKEN;
+  if (!token) {
+    throw new Error('ADMIN_TOKEN이 필요하다: ADMIN_TOKEN=<관리자 토큰> k6 run load/k6/linkpulse.js');
+  }
   const codes = [];
   for (let i = 0; i < LINKS; i++) {
     const res = http.post(
       `${BASE}/api/links`,
       JSON.stringify({ url: `https://example.com/k6/${Date.now()}-${i}` }),
-      { headers: { 'Content-Type': 'application/json' }, tags: { name: 'POST /api/links' } },
+      {
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        tags: { name: 'POST /api/links' },
+      },
     );
     if (res.status !== 201) {
       throw new Error(`링크 생성 실패: ${res.status} ${res.body}`);

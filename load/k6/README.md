@@ -24,8 +24,10 @@
 
 ```bash
 brew install k6
-k6 run load/k6/linkpulse.js
+ADMIN_TOKEN='<관리자 토큰>' k6 run load/k6/linkpulse.js
 ```
+
+setup의 링크 생성은 관리자만 할 수 있다(plan 0011). 토큰은 env로만 넘기고 파일에 적지 않는다.
 
 총 4분 남짓 걸린다. 끝나면 요약 맨 아래 thresholds가 전부 ✓인지 본다. 그리고 `DB 클릭 합계 = N` 로그가 `redirects_302` count와 같은지 본다.
 

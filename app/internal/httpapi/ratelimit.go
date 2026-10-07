@@ -150,9 +150,9 @@ func classify(r *http.Request) tier {
 	switch {
 	case (p == "/healthz" || p == "/readyz") && r.Method == http.MethodGet:
 		return tierExempt
-	case r.Method == http.MethodPost && p == "/api/links":
+	case r.Method == http.MethodPost && (p == "/api/links" || p == "/api/requests" || strings.HasPrefix(p, "/api/admin/")):
 		return tierWrite
-	case r.Method == http.MethodGet && strings.HasPrefix(p, "/api/links/"):
+	case r.Method == http.MethodGet && (strings.HasPrefix(p, "/api/links/") || strings.HasPrefix(p, "/api/requests/") || strings.HasPrefix(p, "/api/admin/")):
 		return tierStats
 	default:
 		return tierRead

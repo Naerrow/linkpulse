@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 const testCodeLen = 7
@@ -96,6 +97,10 @@ func (r *flakyRepo) Create(_ context.Context, code, destURL string) (Link, error
 }
 func (r *flakyRepo) Get(context.Context, string) (Link, error)     { return Link{}, ErrNotFound }
 func (r *flakyRepo) IncrementClicks(context.Context, string) error { return nil }
+func (r *flakyRepo) SetDisabled(context.Context, string, bool) (Link, error) {
+	return Link{}, ErrNotFound
+}
+func (r *flakyRepo) ListRecent(context.Context, int) ([]Link, error) { return nil, nil }
 
 // TestShortenRetriesOnCollision은 충돌 시 새 코드로 재시도해 결국 성공하는지 확인한다.
 func TestShortenRetriesOnCollision(t *testing.T) {
@@ -120,5 +125,60 @@ func TestShortenExhaustsAttempts(t *testing.T) {
 	}
 	if repo.calls != maxCodeAttempts {
 		t.Errorf("Create 호출 횟수 = %d, want %d", repo.calls, maxCodeAttempts)
+	}
+}
+
+// TestDisabledLinkDoesNotRedirect는 중단된 링크가 이동하지 않고 클릭도 세지 않으며, 다시 켜면 돌아오는지 본다(plan 0011).
+func TestDisabledLinkDoesNotRedirect(t *testing.T) {
+	repo := NewMemoryRepository()
+	svc := NewService(repo, 7)
+	ctx := context.Background()
+
+	link, _ := svc.Shorten(ctx, "https://example.com/later-bad")
+	first, err := svc.SetDisabled(ctx, link.Code, true)
+	if err != nil || !first.Disabled() {
+		t.Fatalf("SetDisabled(true) = %+v, %v", first, err)
+	}
+	if _, err := svc.Resolve(ctx, link.Code); !errors.Is(err, ErrLinkDisabled) {
+		t.Fatalf("중단 뒤 Resolve err = %v, want ErrLinkDisabled", err)
+	}
+	if got, _ := svc.Stats(ctx, link.Code); got.Clicks != 0 {
+		t.Errorf("중단된 링크의 클릭이 %d로 셌다", got.Clicks)
+	}
+	// 다시 중단해도 처음 중단 시각을 유지한다. 시계가 확실히 움직이도록 잠깐 기다린다
+	// (두 호출이 같은 마이크로초에 끝나면 덮어써도 같은 값이라 검사가 무의미해진다).
+	time.Sleep(2 * time.Millisecond)
+	again, _ := svc.SetDisabled(ctx, link.Code, true)
+	if !again.DisabledAt.Equal(first.DisabledAt) {
+		t.Errorf("재중단이 시각을 바꿈: %v → %v", first.DisabledAt, again.DisabledAt)
+	}
+
+	if _, err := svc.SetDisabled(ctx, link.Code, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Resolve(ctx, link.Code); err != nil {
+		t.Errorf("다시 켠 뒤 Resolve err = %v", err)
+	}
+	if _, err := svc.SetDisabled(ctx, "missing", true); !errors.Is(err, ErrNotFound) {
+		t.Errorf("없는 코드 err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestListRecentLimit은 최근 목록이 중단된 링크도 포함하고 recentListLimit건까지만 주는지 본다.
+func TestListRecentLimit(t *testing.T) {
+	svc := NewService(NewMemoryRepository(), 7)
+	ctx := context.Background()
+
+	var codes []string
+	for i := 0; i < recentListLimit+5; i++ {
+		l, _ := svc.Shorten(ctx, "https://example.com")
+		codes = append(codes, l.Code)
+	}
+	if _, err := svc.SetDisabled(ctx, codes[len(codes)-1], true); err != nil {
+		t.Fatal(err)
+	}
+	list, err := svc.ListRecent(ctx)
+	if err != nil || len(list) != recentListLimit {
+		t.Fatalf("ListRecent = %d건, %v, want %d", len(list), err, recentListLimit)
 	}
 }
