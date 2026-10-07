@@ -12,6 +12,11 @@ service_desired_count = 2
 # 수동 apply 시에는 현재 라이브 태그(예: v1)로 맞춘다.
 image_tag = "bootstrap"
 
+# 관리자 토큰의 SHA-256 해시(plan 0011). 원문은 여기에도 어디에도 두지 않는다 — 사람만 보관한다.
+#   토큰은 외울 수 있는 8자 이상의 비밀번호(영문·숫자·기호, 단어 사이는 -). 한글은 브라우저가 헤더에 못 싣는다.
+#   read -rs "TOKEN?토큰: "; echo; printf %s "$TOKEN" | shasum -a 256 | cut -d" " -f1; unset TOKEN
+# admin_token_sha256 = "<위 명령의 출력 64자>"
+
 # 비용/사양 조정 예시(기본값으로도 동작).
 # db_instance_class = "db.t4g.micro"
 # task_cpu          = "256"

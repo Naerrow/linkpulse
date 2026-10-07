@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"crypto/sha256"
 	"net/http"
 
 	"github.com/Naerrow/linkpulse/app/internal/links"
@@ -13,10 +14,26 @@ const testBaseURL = "http://short.test"
 // Readiness는 nil이라 readyz는 항상 준비됨으로 응답한다.
 // 레이트리밋은 비활성으로 명시해 핸들러 단위 테스트가 리밋과 결합하지 않게 한다.
 func newTestRouter() http.Handler {
-	svc := links.NewService(links.NewMemoryRepository(), 7)
+	repo := links.NewMemoryRepository()
 	return NewRouter(RouterDeps{
-		Links:     svc,
-		BaseURL:   testBaseURL,
-		RateLimit: RateLimitConfig{Disabled: true},
+		Links:            links.NewService(repo, 7),
+		Requests:         links.NewRequestService(repo, 7),
+		AdminTokenSHA256: testAdminTokenHash(),
+		BaseURL:          testBaseURL,
+		RateLimit:        RateLimitConfig{Disabled: true},
 	})
+}
+
+// testAdminToken은 테스트 라우터의 관리자 토큰이다. 라우터에는 해시만 들어간다(운영과 같은 형태).
+const testAdminToken = "test-admin-token"
+
+func testAdminTokenHash() []byte {
+	sum := sha256.Sum256([]byte(testAdminToken))
+	return sum[:]
+}
+
+// asAdmin은 요청에 관리자 토큰을 붙인다.
+func asAdmin(req *http.Request) *http.Request {
+	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	return req
 }

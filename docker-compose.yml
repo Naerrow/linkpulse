@@ -28,6 +28,10 @@ services:
       PUBLIC_BASE_URL: http://localhost:${APP_HOST_PORT:-8080}
       APP_PORT: "8080"
       LOG_LEVEL: info
+      # 관리자 토큰의 SHA-256(plan 0011). 기본값은 로컬 전용 토큰 "dev-token"의 해시다.
+      # 내 비밀번호로 바꾸려면 저장소 루트의 .env(gitignore됨)에 ADMIN_TOKEN_SHA256=<해시>를 넣는다 —
+      # 이 파일은 공개 저장소에 올라가므로 진짜 비밀번호의 해시를 여기 적지 않는다.
+      ADMIN_TOKEN_SHA256: ${ADMIN_TOKEN_SHA256:-c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712}
     ports:
       # 호스트 8080이 다른 프로세스(예: Apache)와 충돌하면 APP_HOST_PORT로 바꿔 띄운다:
       #   APP_HOST_PORT=8088 docker compose up --build

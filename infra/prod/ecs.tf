@@ -39,7 +39,7 @@ resource "aws_ecs_task_definition" "app" {
       ]
 
       # 비밀번호를 제외한 설정은 평문 env로. host/port/name/user는 RDS 속성에서 가져온다.
-      environment = [
+      environment = concat([
         { name = "APP_PORT", value = "8080" },
         # 운영 모드: DB 미설정 시 인메모리 폴백을 막고 기동을 중단시킨다(app/internal/config).
         { name = "APP_ENV", value = "production" },
@@ -61,7 +61,17 @@ resource "aws_ecs_task_definition" "app" {
         #   ARN의 리전과 다르면 앱이 기동 오류로 막는다.
         { name = "DB_SECRET_ARN", value = local.rotation_secret_arn },
         { name = "AWS_REGION", value = var.region },
-      ]
+        ],
+        # plan 0011: 관리자 토큰의 SHA-256 해시. 토큰은 외우는 비밀번호라 해시가 새면 대입으로 풀릴 수 있다.
+        #   그래서 변수를 sensitive로 둬 plan·apply 출력(공개 PR에 첨부)에 값이 찍히지 않게 한다. 대가로 container_definitions
+        #   diff 전체가 plan에서 가려진다 — env 변경 검토는 이 파일의 코드 diff로 한다.
+        #   태스크 정의(DescribeTaskDefinition)에는 남지만, 그 권한을 가진 주체(운영자·CI 배포 role)는 이미 임의 이미지를
+        #   배포할 수 있어 관리자 토큰보다 강한 권한이다. 그래서 Secrets Manager·SSM 없이 env로 둔다(비용 0).
+        #   값이 없으면 env 자체를 넣지 않는다(빈 문자열 env는 ECS 응답에서 빠져 매 plan마다 교체가 뜰 수 있다).
+        #   그 경우 앱은 관리자 기능(링크 생성·요청 승인)을 끈다(fail-closed).
+        var.admin_token_sha256 == "" ? [] : [
+          { name = "ADMIN_TOKEN_SHA256", value = lower(var.admin_token_sha256) },
+      ])
 
       # 비밀번호만 Secrets Manager에서 주입(가드레일 #2). RDS 관리 시크릿의 password 키 참조.
       secrets = [

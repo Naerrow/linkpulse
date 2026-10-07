@@ -36,19 +36,63 @@ func (r *PostgresRepository) Create(ctx context.Context, code, destURL string) (
 	return l, nil
 }
 
+// linkColumns는 links를 Link로 읽을 때의 열 순서다(scanLink와 짝).
+const linkColumns = `code, url, clicks, created_at, disabled_at`
+
+// scanLink는 linkColumns 순서의 한 행을 읽는다.
+func scanLink(s rowScanner) (Link, error) {
+	var (
+		l        Link
+		disabled sql.NullTime
+	)
+	if err := s.Scan(&l.Code, &l.URL, &l.Clicks, &l.CreatedAt, &disabled); err != nil {
+		return Link{}, err
+	}
+	if disabled.Valid {
+		l.DisabledAt = disabled.Time
+	}
+	return l, nil
+}
+
 // Get은 코드로 링크를 조회한다. 없으면 ErrNotFound.
 func (r *PostgresRepository) Get(ctx context.Context, code string) (Link, error) {
-	const q = `SELECT code, url, clicks, created_at FROM links WHERE code = $1`
-
-	var l Link
-	err := r.db.QueryRowContext(ctx, q, code).Scan(&l.Code, &l.URL, &l.Clicks, &l.CreatedAt)
+	l, err := scanLink(r.db.QueryRowContext(ctx, `SELECT `+linkColumns+` FROM links WHERE code = $1`, code))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Link{}, ErrNotFound
 	}
-	if err != nil {
-		return Link{}, err
+	return l, err
+}
+
+// SetDisabled는 중단 시각을 기록하거나 지운다. 이미 중단된 링크를 다시 중단해도 처음 시각을 유지한다.
+func (r *PostgresRepository) SetDisabled(ctx context.Context, code string, disabled bool) (Link, error) {
+	q := `UPDATE links SET disabled_at = NULL WHERE code = $1 RETURNING ` + linkColumns
+	if disabled {
+		q = `UPDATE links SET disabled_at = COALESCE(disabled_at, now()) WHERE code = $1 RETURNING ` + linkColumns
 	}
-	return l, nil
+	l, err := scanLink(r.db.QueryRowContext(ctx, q, code))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Link{}, ErrNotFound
+	}
+	return l, err
+}
+
+// ListRecent는 링크를 최근 생성순으로 최대 limit건 돌려준다.
+func (r *PostgresRepository) ListRecent(ctx context.Context, limit int) ([]Link, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+linkColumns+` FROM links ORDER BY created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]Link, 0)
+	for rows.Next() {
+		l, err := scanLink(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
 }
 
 // IncrementClicks는 클릭 수를 1 늘린다. 해당 코드가 없으면 ErrNotFound.

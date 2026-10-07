@@ -31,6 +31,12 @@ type linkResponse struct {
 	URL       string    `json:"url"`
 	Clicks    int64     `json:"clicks"`
 	CreatedAt time.Time `json:"created_at"`
+	Disabled  bool      `json:"disabled"` // 운영자가 중단한 링크면 true(plan 0011)
+}
+
+// recentLinksResponse는 운영자 화면의 최근 링크 목록 응답이다.
+type recentLinksResponse struct {
+	Links []linkResponse `json:"links"`
 }
 
 // create는 POST /api/links — 원본 URL을 받아 단축 링크를 만든다.
@@ -63,6 +69,11 @@ func (h *linkHandler) redirect(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "존재하지 않는 단축 링크입니다")
 			return
 		}
+		if errors.Is(err, links.ErrLinkDisabled) {
+			// 410 Gone: 있었지만 일부러 끈 링크다. 404와 구분해 두면 운영 로그에서도 갈린다.
+			writeError(w, http.StatusGone, "link_disabled", "운영자가 중단한 링크입니다")
+			return
+		}
 		writeInternalError(w, r, err)
 		return
 	}
@@ -85,6 +96,43 @@ func (h *linkHandler) stats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.toResponse(link))
 }
 
+// listRecent는 GET /api/admin/links — 운영자가 최근 링크를 본다.
+func (h *linkHandler) listRecent(w http.ResponseWriter, r *http.Request) {
+	recent, err := h.svc.ListRecent(r.Context())
+	if err != nil {
+		writeInternalError(w, r, err)
+		return
+	}
+	out := recentLinksResponse{Links: make([]linkResponse, 0, len(recent))}
+	for _, l := range recent {
+		out.Links = append(out.Links, h.toResponse(l))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// disable은 POST /api/admin/links/{code}/disable — 링크를 중단한다(지우지 않는다).
+func (h *linkHandler) disable(w http.ResponseWriter, r *http.Request) {
+	h.setDisabled(w, r, true)
+}
+
+// enable은 POST /api/admin/links/{code}/enable — 중단한 링크를 다시 켠다.
+func (h *linkHandler) enable(w http.ResponseWriter, r *http.Request) {
+	h.setDisabled(w, r, false)
+}
+
+func (h *linkHandler) setDisabled(w http.ResponseWriter, r *http.Request, disabled bool) {
+	link, err := h.svc.SetDisabled(r.Context(), r.PathValue("code"), disabled)
+	if err != nil {
+		if errors.Is(err, links.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "존재하지 않는 단축 링크입니다")
+			return
+		}
+		writeInternalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.toResponse(link))
+}
+
 // toResponse는 도메인 Link를 응답 DTO로 변환한다.
 func (h *linkHandler) toResponse(l links.Link) linkResponse {
 	return linkResponse{
@@ -93,5 +141,6 @@ func (h *linkHandler) toResponse(l links.Link) linkResponse {
 		URL:       l.URL,
 		Clicks:    l.Clicks,
 		CreatedAt: l.CreatedAt,
+		Disabled:  l.Disabled(),
 	}
 }

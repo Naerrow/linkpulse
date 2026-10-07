@@ -11,4 +11,12 @@ type Link struct {
 	URL       string    // 리다이렉트 대상 원본 URL
 	Clicks    int64     // 누적 클릭 수
 	CreatedAt time.Time // 생성 시각 (UTC)
+	// DisabledAt은 운영자가 링크를 중단한 시각이다. zero면 사용 중이다(plan 0011).
+	// 승인할 때 멀쩡했던 주소도 나중에 주인이 바뀌어 위험해질 수 있어서, 지우지 않고 끌 수 있게 한다.
+	DisabledAt time.Time
+}
+
+// Disabled는 링크가 중단됐는지 알려 준다.
+func (l Link) Disabled() bool {
+	return !l.DisabledAt.IsZero()
 }

@@ -14,6 +14,9 @@ Built and operated as a production service, with a focus on reliability and obse
 
 - 긴 URL → 짧은 키 발급, 짧은 키 → 원본 리다이렉트(302 — 매 방문을 서버가 받아야 집계가 맞다)
 - 링크별 클릭 수 집계와 조회(`GET /api/links/{code}`)
+- **링크 생성은 운영자만** 한다. 방문자는 화면에서 **링크를 요청**하고, 운영자가 주소를 직접 보고 승인하면
+  요청 때 받은 확인 링크로 결과를 본다. 개인정보는 받지 않는다([plan 0011](docs/plans/0011-owner-ui-and-link-requests/plan.md))
+- 화면 한 장(`/`) — Go 바이너리에 내장돼 인프라·비용이 늘지 않는다
 - IP별 레이트리밋(쓰기·통계·읽기 3단계)
 
 > 아직 없는 것: 유입 경로(referrer)·시간대 분석, Redis 캐시·분산 레이트리밋 — P5 이후.
@@ -49,12 +52,29 @@ Built and operated as a production service, with a focus on reliability and obse
 docker compose up --build
 ```
 
+브라우저에서 <http://localhost:8080>을 열면 방문자 화면(링크 요청)이 뜹니다.
+운영자 화면은 **<http://localhost:8080/#admin>**이고(방문자에게는 링크가 없다), 로컬 운영자 토큰은 **`dev-token`**입니다
+(`docker-compose.yml`에는 그 해시만 들어 있고, 운영 토큰과는 무관합니다).
+
 ```bash
-# 단축 생성 → {"code":"...","short_url":"http://localhost:8080/...", ...}
-curl -X POST localhost:8080/api/links -d '{"url":"https://example.com"}'
+# 단축 생성(관리자) → {"code":"...","short_url":"http://localhost:8080/...", ...}
+curl -X POST localhost:8080/api/links -H 'Authorization: Bearer dev-token' -d '{"url":"https://example.com"}'
 # 리다이렉트 (위 응답의 code 사용)
 curl -i localhost:8080/<code>
+# 방문자 링크 요청 → {"id":"...","status":"pending","status_url":"http://localhost:8080/#r=...", ...}
+curl -X POST localhost:8080/api/requests -d '{"url":"https://example.com/wanted","note":"메모"}'
 ```
+
+| API | 누가 | 내용 |
+| --- | --- | --- |
+| `POST /api/links` | 관리자 | 직접 생성 |
+| `GET /{code}` · `GET /api/links/{code}` | 누구나 | 리다이렉트 · 클릭 수 |
+| `POST /api/requests` · `GET /api/requests/{id}` | 누구나 | 링크 요청 · 결과 확인 |
+| `GET /api/admin/requests` | 관리자 | 대기 목록 |
+| `POST /api/admin/requests/{id}/approve` · `/reject` | 관리자 | 승인(링크 발급) · 거절 |
+| `GET /api/admin/links` · `POST /api/admin/links/{code}/disable` · `/enable` | 관리자 | 최근 링크 · 중단(410) · 다시 사용 |
+
+관리자 인증은 `Authorization: Bearer <토큰>`입니다. 서버에는 토큰의 SHA-256 해시만 `ADMIN_TOKEN_SHA256`으로 주고, 비어 있으면 관리자 기능이 꺼집니다.
 
 - 데이터는 Postgres에 저장되며 `pgdata` 볼륨으로 재시작 후에도 유지됩니다.
 - 종료: `docker compose down` (데이터까지 지우려면 `docker compose down -v`).
@@ -63,8 +83,10 @@ curl -i localhost:8080/<code>
 DB 없이 앱만 빠르게 띄우려면(인메모리, 재시작 시 데이터 소실):
 
 ```bash
-cd app && go run ./cmd/server
+cd app && ADMIN_TOKEN_SHA256=c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712 go run ./cmd/server
 ```
+
+`ADMIN_TOKEN_SHA256`은 `dev-token`의 해시입니다. 빼고 띄우면 관리자 기능이 꺼집니다.
 
 ## 저장소 구조
 

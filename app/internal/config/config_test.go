@@ -303,3 +303,33 @@ func TestResolveConnMaxLifetime(t *testing.T) {
 		})
 	}
 }
+
+// TestParseAdminTokenHash는 관리자 해시 형식 검사를 본다(plan 0011).
+// 빈 값은 "꺼짐"이고, 값이 있는데 틀리면 기동을 막는다 — 토큰 원문을 잘못 넣는 실수가 가장 흔하다.
+func TestParseAdminTokenHash(t *testing.T) {
+	const valid = "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b" // sha256("1")
+
+	if b, err := parseAdminTokenHash("  "); err != nil || b != nil {
+		t.Errorf("빈 값 = %v, %v, want nil, nil", b, err)
+	}
+	for _, in := range []string{valid, strings.ToUpper(valid), " " + valid + "\n"} {
+		if b, err := parseAdminTokenHash(in); err != nil || len(b) != 32 {
+			t.Errorf("parseAdminTokenHash(%q) = %d바이트, %v", in, len(b), err)
+		}
+	}
+	for _, in := range []string{"my-secret-token", valid[:63], valid + "00", "zz" + valid[2:]} {
+		if _, err := parseAdminTokenHash(in); err == nil {
+			t.Errorf("parseAdminTokenHash(%q)가 통과됨", in)
+		}
+	}
+}
+
+// TestLoadRejectsMalformedAdminHash는 형식이 틀린 해시로 기동이 막히는지 본다.
+func TestLoadRejectsMalformedAdminHash(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("APP_ENV", "")
+	t.Setenv("ADMIN_TOKEN_SHA256", "not-a-hash")
+	if _, err := Load(); err == nil {
+		t.Fatal("잘못된 ADMIN_TOKEN_SHA256인데 Load가 성공함")
+	}
+}
