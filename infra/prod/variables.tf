@@ -90,6 +90,8 @@ variable "admin_token_sha256" {
   description = "관리자 토큰의 SHA-256 해시(16진수 64자). 원문이 아니다. 비우면 관리자 기능이 꺼진다(plan 0011)."
   type        = string
   default     = ""
+  # 토큰이 외우는 비밀번호라 해시도 비밀로 다룬다 — plan 출력이 공개 PR에 붙는다(ecs.tf 주석 참고).
+  sensitive = true
 
   validation {
     condition     = can(regex("^([0-9a-fA-F]{64})?$", var.admin_token_sha256))

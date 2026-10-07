@@ -62,9 +62,11 @@ resource "aws_ecs_task_definition" "app" {
         { name = "DB_SECRET_ARN", value = local.rotation_secret_arn },
         { name = "AWS_REGION", value = var.region },
         ],
-        # plan 0011: 관리자 토큰의 SHA-256 해시. 토큰 원문이 아니라 해시라서 평문 env로 둔다 —
-        #   토큰이 256비트 난수라 해시로 역산할 수 없고, 그래서 Secrets Manager가 필요 없다(비용 0).
-        #   sensitive로 두지 않는 이유: 그러면 container_definitions 전체가 plan에서 가려져 env diff를 검토할 수 없다.
+        # plan 0011: 관리자 토큰의 SHA-256 해시. 토큰은 외우는 비밀번호라 해시가 새면 대입으로 풀릴 수 있다.
+        #   그래서 변수를 sensitive로 둬 plan·apply 출력(공개 PR에 첨부)에 값이 찍히지 않게 한다. 대가로 container_definitions
+        #   diff 전체가 plan에서 가려진다 — env 변경 검토는 이 파일의 코드 diff로 한다.
+        #   태스크 정의(DescribeTaskDefinition)에는 남지만, 그 권한을 가진 주체(운영자·CI 배포 role)는 이미 임의 이미지를
+        #   배포할 수 있어 관리자 토큰보다 강한 권한이다. 그래서 Secrets Manager·SSM 없이 env로 둔다(비용 0).
         #   값이 없으면 env 자체를 넣지 않는다(빈 문자열 env는 ECS 응답에서 빠져 매 plan마다 교체가 뜰 수 있다).
         #   그 경우 앱은 관리자 기능(링크 생성·요청 승인)을 끈다(fail-closed).
         var.admin_token_sha256 == "" ? [] : [
