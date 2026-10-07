@@ -86,6 +86,17 @@ variable "task_cpu_architecture" {
   default     = "ARM64"
 }
 
+variable "admin_token_sha256" {
+  description = "관리자 토큰의 SHA-256 해시(16진수 64자). 원문이 아니다. 비우면 관리자 기능이 꺼진다(plan 0011)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = can(regex("^([0-9a-fA-F]{64})?$", var.admin_token_sha256))
+    error_message = "admin_token_sha256은 빈 값이거나 SHA-256 해시(16진수 64자)여야 한다. 토큰 원문을 넣지 않았는지 확인한다."
+  }
+}
+
 variable "log_level" {
   description = "앱 LOG_LEVEL."
   type        = string

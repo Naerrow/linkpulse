@@ -39,7 +39,7 @@ resource "aws_ecs_task_definition" "app" {
       ]
 
       # 비밀번호를 제외한 설정은 평문 env로. host/port/name/user는 RDS 속성에서 가져온다.
-      environment = [
+      environment = concat([
         { name = "APP_PORT", value = "8080" },
         # 운영 모드: DB 미설정 시 인메모리 폴백을 막고 기동을 중단시킨다(app/internal/config).
         { name = "APP_ENV", value = "production" },
@@ -61,7 +61,15 @@ resource "aws_ecs_task_definition" "app" {
         #   ARN의 리전과 다르면 앱이 기동 오류로 막는다.
         { name = "DB_SECRET_ARN", value = local.rotation_secret_arn },
         { name = "AWS_REGION", value = var.region },
-      ]
+        ],
+        # plan 0011: 관리자 토큰의 SHA-256 해시. 토큰 원문이 아니라 해시라서 평문 env로 둔다 —
+        #   토큰이 256비트 난수라 해시로 역산할 수 없고, 그래서 Secrets Manager가 필요 없다(비용 0).
+        #   sensitive로 두지 않는 이유: 그러면 container_definitions 전체가 plan에서 가려져 env diff를 검토할 수 없다.
+        #   값이 없으면 env 자체를 넣지 않는다(빈 문자열 env는 ECS 응답에서 빠져 매 plan마다 교체가 뜰 수 있다).
+        #   그 경우 앱은 관리자 기능(링크 생성·요청 승인)을 끈다(fail-closed).
+        var.admin_token_sha256 == "" ? [] : [
+          { name = "ADMIN_TOKEN_SHA256", value = lower(var.admin_token_sha256) },
+      ])
 
       # 비밀번호만 Secrets Manager에서 주입(가드레일 #2). RDS 관리 시크릿의 password 키 참조.
       secrets = [
