@@ -107,5 +107,10 @@ func normalizeURL(raw string) (string, error) {
 	if u.Host == "" {
 		return "", ErrInvalidURL
 	}
+	// userinfo(https://www.paypal.com@evil.example/)는 사람이 읽으면 앞쪽 도메인으로 보인다.
+	// 요청은 사람이 URL을 보고 승인하므로(plan 0011) 판독을 속이는 이 형식은 서버가 먼저 거른다.
+	if u.User != nil {
+		return "", ErrInvalidURL
+	}
 	return u.String(), nil
 }

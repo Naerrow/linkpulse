@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -256,6 +257,27 @@ func TestRequestIDNotLogged(t *testing.T) {
 	}
 }
 
+// TestErrorLogsMaskRequestID는 500·panic 로그도 요청 ID를 가리는지 본다(접근 로그 밖의 두 자리).
+func TestErrorLogsMaskRequestID(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	const id = "secret-request-id"
+	writeInternalError(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/requests/"+id, nil), errors.New("DB 장애"))
+	recoverer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom") })).
+		ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/requests/"+id, nil))
+
+	logs := buf.String()
+	if strings.Contains(logs, id) {
+		t.Fatalf("로그에 요청 ID가 남음:\n%s", logs)
+	}
+	if n := strings.Count(logs, `"path":"/api/requests/{id}"`); n != 2 {
+		t.Errorf("마스킹된 경로 %d건, want 2:\n%s", n, logs)
+	}
+}
+
 // TestLogPath는 경로 마스킹 규칙을 본다.
 func TestLogPath(t *testing.T) {
 	cases := map[string]string{
@@ -286,6 +308,8 @@ func TestClassifyNewRoutes(t *testing.T) {
 		{http.MethodPost, "/api/links", tierWrite},
 		{http.MethodGet, "/api/requests/abc", tierStats},
 		{http.MethodGet, "/api/admin/requests", tierStats},
+		{http.MethodHead, "/api/admin/requests", tierStats},
+		{http.MethodHead, "/api/requests/abc", tierStats},
 		{http.MethodGet, "/", tierRead},
 		{http.MethodGet, "/static/app.js", tierRead},
 	}

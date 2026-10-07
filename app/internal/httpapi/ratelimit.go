@@ -152,7 +152,8 @@ func classify(r *http.Request) tier {
 		return tierExempt
 	case r.Method == http.MethodPost && (p == "/api/links" || p == "/api/requests" || strings.HasPrefix(p, "/api/admin/")):
 		return tierWrite
-	case r.Method == http.MethodGet && (strings.HasPrefix(p, "/api/links/") || strings.HasPrefix(p, "/api/requests/") || strings.HasPrefix(p, "/api/admin/")):
+	// ServeMux는 GET 패턴을 HEAD에도 매칭하므로 HEAD도 같은 한도로 묶는다(관리자 토큰 대입이 읽기 한도로 새지 않게).
+	case (r.Method == http.MethodGet || r.Method == http.MethodHead) && (strings.HasPrefix(p, "/api/links/") || strings.HasPrefix(p, "/api/requests/") || strings.HasPrefix(p, "/api/admin/")):
 		return tierStats
 	default:
 		return tierRead

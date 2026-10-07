@@ -74,8 +74,9 @@ CREATE INDEX IF NOT EXISTS link_requests_status_created ON link_requests (status
 ```
 
 - `schema.sql`은 기동할 때마다 적용된다(`db.go:74`). `IF NOT EXISTS`이므로 기존 `links`에 영향이 없다.
-- 승인은 `BEGIN → INSERT links(코드 충돌 시 새 코드로 재시도) → UPDATE link_requests … WHERE id=$1 AND status='pending' → COMMIT`이다.
-  UPDATE가 0행이면 롤백하고 409를 낸다(동시 승인과 이미 결정된 요청을 같은 경로로 막는다).
+- 승인은 `BEGIN → SELECT … FROM link_requests WHERE id=$1 FOR UPDATE → INSERT links → UPDATE link_requests → COMMIT`이다.
+  `pending`이 아니면 409로 끝낸다. `FOR UPDATE`가 동시 승인을 줄 세우므로 뒤에 온 승인은 결정된 상태를 보고 409가 된다.
+  코드가 충돌하면 트랜잭션 전체를 되돌리고, 서비스가 새 코드로 다시 시도한다.
 
 ### 화면 (파일 3개를 바이너리에 내장)
 
@@ -95,7 +96,9 @@ CREATE INDEX IF NOT EXISTS link_requests_status_created ON link_requests (status
 
 - `ecs.tf` environment에 `ADMIN_TOKEN_SHA256 = var.admin_token_sha256`(변수 기본값 `""`)을 추가한다. 새 리소스는 없다.
   - **값이 비면 env 자체를 넣지 않는다**(조건부 `concat`). 빈 문자열 env는 ECS 응답에서 빠져 매 plan마다 교체가 뜰 수 있다.
-  - **`sensitive`로 두지 않는다.** 그러면 `container_definitions` 전체가 plan에서 가려져 env diff를 검토할 수 없다. 해시라 노출돼도 무해하다.
+  - **변수를 `sensitive`로 둔다**(코드 검토 r1에서 바꿈). 토큰이 외우는 비밀번호라 해시가 새면 대입으로 풀릴 수 있고, plan 출력은 공개 PR에 붙는다.
+    대가로 `container_definitions` diff 전체가 plan에서 가려진다. env 변경은 `ecs.tf` 코드 diff로 검토한다.
+    태스크 정의에는 값이 남는다. 하지만 읽을 수 있는 주체(운영자·CI 배포 role)는 이미 임의 이미지를 배포할 수 있어 새 권한이 생기지 않는다.
   - 변수 `validation`으로 "빈 값 또는 16진수 64자"만 받는다. 토큰 원문을 넣는 실수를 apply 전에 막는다.
 - 값은 gitignore된 `infra/prod/terraform.tfvars`에만 둔다.
 
@@ -128,20 +131,23 @@ CREATE INDEX IF NOT EXISTS link_requests_status_created ON link_requests (status
 | 리스크 | 완화 | 롤백 |
 | --- | --- | --- |
 | 화면 XSS로 `localStorage`의 토큰 탈취 | `textContent`만 사용, CSP `script-src 'self'`, 3단계 수동 확인 | 토큰 교체(새 해시 → apply → CI 배포) |
-| 토큰 분실·유출 | 원문은 사람만 보관한다. 해시는 tfvars에만 둔다 | 위와 같다 |
+| 토큰 분실·유출 | 원문은 사람만 보관한다. 해시는 tfvars에 두고 `sensitive`로 plan 출력에서 가린다 | 위와 같다 |
 | 요청 스팸 | 쓰기 한도(IP당 분당 20), 대기 상한 100건, 사람 승인 | 거절 처리. 심하면 `POST /api/requests`만 끄는 배포 |
 | 요청자가 확인 링크를 잃음 | 개인정보를 받지 않는 대가다. 다시 요청하면 된다 | — |
 | 승인 트랜잭션 버그로 고아 링크 | 4단계 동시 승인 통합 테스트 | PR revert → CI 재배포 |
 | 배포 순서 실수(앱 먼저) | fail-closed라 관리자 기능만 꺼지고 서비스는 정상 | 7단계 apply 후 CI 배포 1회 |
+| 기동 때 스키마 잠금 대기 | `schema.sql`의 `ALTER TABLE`·`CREATE INDEX`는 이미 있어도 매 기동 `links` 잠금을 잡는다(평소 마이크로초). 운영 DB에서 트랜잭션을 열어 둔 채 배포하지 않는다 | 열어 둔 세션을 끝낸다 |
 
 롤백은 전체적으로 **PR revert → CI 재배포**다. 테이블은 남아도 무해하다(`IF NOT EXISTS`). env도 옛 이미지에 무해하다.
+다만 0011 이전 이미지로 돌아가면 **운영자가 중단한 링크가 다시 리다이렉트되고 `POST /api/links`가 다시 공개된다.** 옛 코드는 `disabled_at`과 관리자 인증을 모른다.
 
 ## 구현 중 바꾼 것 (revision 2)
 
 - **요청 기능을 별도 `requests` 패키지가 아니라 `links` 패키지 안에 뒀다.** 승인이 링크 생성과 같은 락·같은 트랜잭션을 써야 해서,
   같은 저장소 구현체(`MemoryRepository`·`PostgresRepository`)가 두 인터페이스를 함께 만족하게 했다(`links.Store`).
   코드 발급(`randomCode`)과 URL 검증(`normalizeURL`)도 내보내지 않고 그대로 재사용한다.
-- 인프라 env를 조건부로, 변수를 비-sensitive로 했다(위 "인프라" 절).
+- 인프라 env를 조건부로, 변수를 비-sensitive로 했다(위 "인프라" 절). 비-sensitive는 코드 검토 r1에서 sensitive로 바꿨다.
+- 승인 SQL을 "UPDATE … WHERE status='pending'이 0행이면 409"에서 "`SELECT … FOR UPDATE`로 먼저 판정"으로 바꿨다. 동작은 같고 순서가 코드에서 바로 보인다.
 - fail-closed는 두 겹이다. `enabled()` 검사가 있고, 해시가 비면 `ConstantTimeCompare`가 길이 불일치로 0을 돌려준다.
   그래서 `enabled()` 하나만 지우는 변이는 동작을 바꾸지 않는다. 테스트는 동작(빈 해시면 맞는 토큰도 401)을 고정한다.
 
@@ -151,7 +157,7 @@ CREATE INDEX IF NOT EXISTS link_requests_status_created ON link_requests (status
   승인할 때 멀쩡했던 주소도 나중에 도메인 주인이 바뀌어 위험해질 수 있으므로 운영자가 끌 수 있어야 한다.
   `links.disabled_at`(NULL이면 사용 중)을 `ADD COLUMN IF NOT EXISTS`로 붙이고, 중단된 링크는 **410 Gone**으로 답하며 클릭을 세지 않는다.
   **지우지 않는다** — 클릭 기록을 남기고 언제든 다시 켤 수 있게 한다. 운영자 화면에 최근 50개 목록과 중단·다시 사용 버튼을 둔다.
-  롤링 배포 중 옛 태스크는 열 이름을 지정해 읽으므로 새 열의 영향을 받지 않고, 롤백해도 열은 무해하다.
+  롤링 배포 중 옛 태스크는 열 이름을 지정해 읽으므로 새 열의 영향을 받지 않고, 롤백해도 열 자체는 무해하다(중단이 풀리는 효과는 리스크/롤백 절).
 - **토큰을 난수에서 외울 수 있는 비밀번호로 바꿨다.** 사용자 질문: *"다른 컴퓨터에서 사이트만 치고 들어갈 때도 입력해야 하는데,
   이 컴퓨터만 써야 한다면 무슨 의미지?"* — 44자 난수는 외울 수 없어 사실상 보관한 기기에 묶인다. 서버는 어떤 문자열이든 해시로 비교하므로 코드 변경은 없다.
   트레이드오프: 해시가 새면 난수보다 대입에 약하다. 최소 길이는 사용자 결정으로 8자다(20자는 외우기 부담). 다른 곳에 안 쓴 비밀번호로 하고, 해시는 AWS 계정과 로컬 tfvars 밖으로 내보내지 않는다.

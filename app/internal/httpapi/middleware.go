@@ -37,7 +37,7 @@ func recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				slog.Error("panic recovered", "error", rec, "path", r.URL.Path)
+				slog.Error("panic recovered", "error", rec, "path", logPath(r.URL.Path))
 				writeError(w, http.StatusInternalServerError, "internal_error", "내부 서버 오류")
 			}
 		}()

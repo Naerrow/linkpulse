@@ -34,10 +34,11 @@ func TestShortenRejectsInvalidURL(t *testing.T) {
 	bad := []string{
 		"",
 		"   ",
-		"example.com",         // 스킴 없음
-		"ftp://example.com",   // 허용 안 되는 스킴
-		"javascript:alert(1)", // XSS 악용 차단
-		"https://",            // 호스트 없음
+		"example.com",                          // 스킴 없음
+		"ftp://example.com",                    // 허용 안 되는 스킴
+		"javascript:alert(1)",                  // XSS 악용 차단
+		"https://",                             // 호스트 없음
+		"https://www.paypal.com@evil.example/", // userinfo로 도메인 위장
 	}
 	for _, in := range bad {
 		if _, err := svc.Shorten(context.Background(), in); !errors.Is(err, ErrInvalidURL) {
