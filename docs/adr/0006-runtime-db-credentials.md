@@ -145,5 +145,8 @@ ECS Fargate는 Lambda와 달리 `AWS_REGION`을 자동 주입하지 않고, AWS 
   구값 창 20초 후 **619ms~2.36초**, SDK 3연속 실패 후 **432~716ms**,
   `/readyz` 전용 경로 **2.08~2.11초**(503 1회). 2회차는 `-race`로 돌렸고 레이스 없음.
   절차는 [`rotation_integration_test.go`](../../app/internal/db/rotation_integration_test.go) 머리 주석.
-- ⛔ **남은 것**: 2-6 실전 검증(온디맨드 회전). 위 숫자는 전부 앱 쪽 회복 시간이고,
-  실제 창에는 `T_set`→`T_avail`이 앞에 붙는다. **프로덕션 값은 2-6에서만 나온다.**
+- **프로덕션(2-6, 2026-10-07 온디맨드 회전, Step 1 켠 채)**: 회전 전 태스크 2개 **모두**에서
+  `auth_failed_observed(1) → secret_refreshed(1→2) → credential_recovered(2)`가 순서대로 났다.
+  라벨 이동(01:47:18Z) 후 **0~3초**에 회복했고, refresh→재연결은 **13~15ms**였다.
+  503은 **약 61초(44건)** — 거의 전부 `T_set`→`T_label` 구간(회전 Lambda 내부, 앱이 못 줄이는 곳)이다.
+  Step 1 롤아웃은 그보다 3분 뒤(01:50:26Z)에 끝났다. 비교: Step 1만 있던 09-07 드릴은 다운 **12분 34초**.

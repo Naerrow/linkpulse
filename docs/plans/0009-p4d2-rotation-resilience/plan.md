@@ -1,10 +1,26 @@
 ---
-status: in-review
+status: approved
 revision: 23
 created: 2026-08-24
 ---
 
 # 0009. P4(d)-2 로테이션 근본 대응 — 앱이 비밀번호 회전을 견디게 한다
+
+## ✅ 실행 결과 (2026-10-07) — 완료
+
+**목표를 달성했다: 회전이 돌아도 사람 개입 없이 회복된다.** 온디맨드 회전 1회로 2-6과 1-7을 함께 닫았다.
+
+| 항목 | 결과 |
+| --- | --- |
+| 2-5 배포 | 인프라를 이 브랜치에서 재기동(빈 state → apply ①② 동시) → env 게이트 통과 → PR #20 머지 → 두 태스크 `secret_provider_mode=secret` |
+| 2-6 Step 2 실전 | ✅ 회전 전 태스크 **2개 모두** `auth_failed_observed(1) → secret_refreshed(1→2) → credential_recovered(2)`. 라벨 이동 후 **0~3초** 회복 |
+| 1-7 Step 1 | ✅ `redeploy_submitted` 1건(중복 없음), 롤아웃 `COMPLETED`까지 **3분 8초**(기준 10분) |
+| 서비스 영향 | 503 **약 61초**(44건) — 거의 전부 회전 Lambda 내부 구간(`T_set`→`T_label`). 09-07 드릴(Step 1만) **12분 34초** 대비 |
+| 알람 | `canary_down` 발화 없음. `alb-target-5xx`는 ALARM 후 약 15분 유지 — CloudWatch 평가 범위 동작(오류 지속 아님, 런북에 기록) |
+| 30초 투입·회수 | 임시 브랜치에서 apply → 드릴 → main에서 다시 apply. 최종 `conn_max_lifetime=5m0s` 확인 |
+
+상세 시각표: [`secret-rotation-bridge.md`](../../runbooks/secret-rotation-bridge.md) "프로덕션 실측",
+설계 근거: [ADR 0006](../../adr/0006-runtime-db-credentials.md). 아래 본문은 결정 과정의 기록으로 남긴다.
 
 ## 목표
 
@@ -1515,10 +1531,11 @@ main push가 자동 배포를 시작하므로 **앱 merge가 인프라보다 먼
 **작업 트리 상태를 단계마다 명시한다**(r8 codex-cli#4): apply ① 시점의 트리에는 **2-2a만** 반영돼 있고,
 apply ② 시점에는 **2-2b까지** 반영돼 있다. 임시 revert나 `-target`을 쓰지 않는다.
 
-> ⚠️ **1·2번은 Step 2 코드 검토 round-4에서 `apply-gate-2-5.md`로 대체됐다.** Terraform은 state의 revision
-> 하나만 deregister하고 서비스가 도는 revision은 CI가 등록한 것이라, ①을 먼저 하지 않아도 롤백 대상이
-> 사라지지 않는다(provider 6.52.0 소스 확인). 인프라를 내린 지금은 **이 브랜치에서 `full-apply-prod.sh`로
-> 재기동하는 것이 곧 ①②**다. 아래 1·2번은 기록으로 남긴다.
+> ⚠️ **1·2번은 Step 2 코드 검토 round-4에서 대체됐다.** Terraform은 state의 revision 하나만 deregister하고
+> (provider 6.52.0 `task_definition.go`의 Read·Delete가 state의 `arn`만 다룬다) 서비스가 도는 revision은 CI가
+> 등록한 것이라, ①을 먼저 하지 않아도 롤백 대상이 사라지지 않는다. 인프라를 내려 둔 상태였으므로
+> **이 브랜치에서 `full-apply-prod.sh`로 재기동한 것이 곧 ①②**였다(2026-10-07 실행, 위 "실행 결과").
+> 일회성 절차 문서 `apply-gate-2-5.md`는 실행 후 지웠다. 아래 1·2번은 기록으로 남긴다.
 
 1. **[사람] apply ① — 작업 트리에 `skip_destroy = true`만 있는 상태(2-2a)에서 apply.**
    **성공 기준은 "변경 0"이 아니다**(r4 codex-ide#5 — revision 4의 표현이 틀렸다). 현재 미설정 값의 기본이
@@ -1568,7 +1585,7 @@ apply ② 시점에는 **2-2b까지** 반영돼 있다. 임시 revert나 `-targe
    ⚠️ **평시 값이 아니다.** 되돌림(아래 7)을 **2-6의 완료 조건**으로 못박는다 —
    잊으면 *"임시 설정이 영구가 되는"* 형태로 남는다.
 7. **[2-6 이후] `DB_CONN_MAX_LIFETIME` 회수 — 같은 경로를 반대로 탄다.**
-   HCL에서 env 제거 → `plan`(task definition `-/+` · `0 destroy`) → **[사람] apply** →
+   HCL에서 env 제거 → `plan`(task definition `-/+` — 요약 `1 to add, 1 to destroy`) → **[사람] apply** →
    최신 ACTIVE에 env가 **없는지** 확인 → **CI 배포 1회** → 기동 로그가 **`5m`**인지 확인.
    ⚠️ **2-6을 재시도하려면 6번을 다시 수행한다** — 회수한 뒤에는 30초가 없다.
    ⚠️ **중간에 apply나 CI가 실패하면**: task definition은 새 revision이 등록됐지만 라이브는 옛 revision이다.
