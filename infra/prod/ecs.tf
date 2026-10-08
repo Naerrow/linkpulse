@@ -71,6 +71,12 @@ resource "aws_ecs_task_definition" "app" {
         #   그 경우 앱은 관리자 기능(링크 생성·요청 승인)을 끈다(fail-closed).
         var.admin_token_sha256 == "" ? [] : [
           { name = "ADMIN_TOKEN_SHA256", value = lower(var.admin_token_sha256) },
+        ],
+        # plan 0012: 한계 측정 동안만 측정 클라이언트 IP를 레이트리밋 예외로 둔다. 측정 apply의 -var로만 넣고,
+        #   측정 뒤 destroy하므로 라이브에 남지 않는다(skip_destroy라 이 값이 든 revision은 계정 안에만 남는다).
+        #   관리자 해시와 같은 이유로 값이 없으면 env를 넣지 않는다. 그러면 앱은 예외 없이 모든 IP를 제한한다.
+        var.rate_limit_exempt_ips == "" ? [] : [
+          { name = "RATE_LIMIT_EXEMPT_IPS", value = var.rate_limit_exempt_ips },
       ])
 
       # 비밀번호만 Secrets Manager에서 주입(가드레일 #2). RDS 관리 시크릿의 password 키 참조.
