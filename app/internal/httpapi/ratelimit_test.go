@@ -178,6 +178,52 @@ func TestRateLimit_IndependentIPs(t *testing.T) {
 	}
 }
 
+// (f) 예외 IP는 모든 티어에서 한도를 넘어도 통과하고, 같은 라우터의 다른 IP는 그대로 막힌다(plan 0012).
+func TestRateLimit_ExemptIPBypassesAllTiers(t *testing.T) {
+	const exemptIP, otherIP = "198.51.100.7", "203.0.113.30"
+	cfg := RateLimitConfig{
+		WritePerMin: 60, WriteBurst: 2,
+		StatsPerMin: 60, StatsBurst: 2,
+		ReadPerMin: 60, ReadBurst: 2,
+		ExemptIPs: []string{exemptIP},
+	}
+	tiers := []struct{ name, method, path, body string }{
+		{"write", http.MethodPost, "/api/links", `{"url":"https://example.com"}`},
+		{"stats", http.MethodGet, "/api/links/abc", ""},
+		{"read", http.MethodGet, "/somecode", ""},
+	}
+	for _, tc := range tiers {
+		t.Run(tc.name, func(t *testing.T) {
+			router := newRateLimitedRouter(cfg)
+			for i := 0; i < 10; i++ { // 버스트(2)를 훨씬 넘긴다
+				if rec := doReq(router, tc.method, tc.path, tc.body, exemptIP); rec.Code == http.StatusTooManyRequests {
+					t.Fatalf("예외 IP 요청 %d: 429 — 예외가 적용되지 않았다", i+1)
+				}
+			}
+			for i := 0; i < 2; i++ {
+				doReq(router, tc.method, tc.path, tc.body, otherIP)
+			}
+			if rec := doReq(router, tc.method, tc.path, tc.body, otherIP); rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("다른 IP가 버스트를 넘겼는데 status = %d, want 429", rec.Code)
+			}
+		})
+	}
+}
+
+// (g) XFF 왼쪽에 예외 IP를 꾸며 넣어도 예외를 얻지 못한다. ALB가 맨 뒤에 붙인 값만 본다.
+func TestRateLimit_ExemptIPNotSpoofableViaXFF(t *testing.T) {
+	const exemptIP = "198.51.100.7"
+	router := newRateLimitedRouter(RateLimitConfig{ReadPerMin: 60, ReadBurst: 2, ExemptIPs: []string{exemptIP}})
+	spoofed := exemptIP + ", 203.0.113.31" // 왼쪽은 클라이언트가 쓴 값, 오른쪽은 ALB가 관측한 실제 소스
+
+	for i := 0; i < 2; i++ {
+		doReq(router, http.MethodGet, "/somecode", "", spoofed)
+	}
+	if rec := doReq(router, http.MethodGet, "/somecode", "", spoofed); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("XFF 왼쪽 위조로 예외를 얻었다: status = %d, want 429", rec.Code)
+	}
+}
+
 // zero-value RateLimitConfig는 운영 기본값으로 리밋을 켠다(main.go가 의존하는 경로 — 회귀 방지).
 func TestRateLimit_ZeroValueUsesProductionDefaults(t *testing.T) {
 	router := newRateLimitedRouter(RateLimitConfig{}) // zero-value → withDefaults로 운영 기본값

@@ -56,6 +56,10 @@ type RateLimitConfig struct {
 	ReadPerMin  int
 	ReadBurst   int
 
+	// ExemptIPs는 모든 티어 한도를 건너뛰는 클라이언트 IP다(plan 0012 한계 측정용, 평시 비어 있음).
+	// clientIP 결과와 정확히 일치할 때만 예외다 — XFF 왼쪽 값을 꾸며서는 얻을 수 없다.
+	ExemptIPs []string
+
 	// now는 TTL 스윕(lastSeen 판정)용 클럭이다. nil이면 time.Now.
 	// 주의: 토큰 리필은 rate.Limiter가 내부적으로 time.Now를 쓰므로 이 clock의 영향을 받지 않는다.
 	now func() time.Time
@@ -98,7 +102,8 @@ type bucket struct {
 // 백그라운드 janitor 고루틴을 두지 않고, 새 키 삽입 시 기회적으로 오래된 항목을 스윕한다
 // (테스트마다 라우터를 새로 만들어도 고루틴 누수가 없다).
 type rateLimit struct {
-	cfg RateLimitConfig // withDefaults 적용 완료본
+	cfg    RateLimitConfig     // withDefaults 적용 완료본
+	exempt map[string]struct{} // cfg.ExemptIPs의 정규화 집합(생성 후 읽기 전용이라 락이 필요 없다)
 
 	mu        sync.Mutex // buckets/lastSweep 보호(*rate.Limiter 자체는 동시성 안전하나 맵 변형은 락 필요)
 	buckets   map[string]*bucket
@@ -108,8 +113,13 @@ type rateLimit struct {
 // newRateLimit은 기본값을 채운 리미터를 만든다(상태 맵 1회 생성).
 func newRateLimit(cfg RateLimitConfig) *rateLimit {
 	cfg = cfg.withDefaults()
+	exempt := make(map[string]struct{}, len(cfg.ExemptIPs))
+	for _, ip := range cfg.ExemptIPs {
+		exempt[canonicalIP(ip)] = struct{}{}
+	}
 	return &rateLimit{
 		cfg:       cfg,
+		exempt:    exempt,
 		buckets:   make(map[string]*bucket),
 		lastSweep: cfg.now(),
 	}
@@ -123,6 +133,13 @@ func (rl *rateLimit) middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		ip := clientIP(r)
+		// 측정 클라이언트는 티어와 무관하게 통과한다. 버킷도 만들지 않는다.
+		if _, ok := rl.exempt[ip]; ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		t := classify(r)
 		if t == tierExempt {
 			next.ServeHTTP(w, r)
@@ -130,7 +147,7 @@ func (rl *rateLimit) middleware(next http.Handler) http.Handler {
 		}
 
 		perMinLimit, burst := rl.tierParams(t)
-		key := string(t) + "|" + clientIP(r)
+		key := string(t) + "|" + ip
 		if !rl.limiterFor(key, perMin(perMinLimit), burst).Allow() {
 			// Retry-After는 writeError(내부에서 WriteHeader 호출)보다 먼저 설정해야 반영된다.
 			// 값은 리미터 상태를 소비하지 않게 산출한다(토큰 1개 리필 주기 = ceil(60/perMin)초).

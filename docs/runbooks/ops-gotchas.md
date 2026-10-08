@@ -240,3 +240,69 @@ aws logs tail /ecs/linkpulse-prod-app --region ap-northeast-2 --since 2h | grep 
 `--start-time "$T0"`을 쓰면 `invalid int value: ''`로 실패한다. 태스크별 로그 스트림을 조회할 때는
 `--start-time 0`이면 충분하다(스트림 자체가 그 태스크의 기동 이후다).
 
+
+---
+
+## G-9. destroy 도중 컴퓨터를 꺼서 state 저장 실패 + 잠금이 남았다
+
+**증상** — 다음 날 `./scripts/full-destroy-prod.sh --drop-dev-db`를 다시 돌리자 첫 plan이 잠금 오류로 멈췄다(2026-10-08).
+```
+Error: Error acquiring the state lock
+... StatusCode: 412 ... PreconditionFailed
+Lock Info:
+  ID:        d20e6b95-29f2-1df2-f74d-d95989622af0
+  Operation: OperationTypeApply
+  Created:   2026-10-07 07:58:00 UTC
+```
+전날 destroy 창의 마지막 출력은 이랬다.
+```
+Error: ... dial tcp: lookup ec2.ap-northeast-2.amazonaws.com: no such host
+Error: Failed to save state
+  ... the state has been written to the file "errored.tfstate" in the current working directory.
+  Running "terraform apply" again at this point will create a forked state
+Error: Error releasing the state lock
+```
+
+**원인** — 10-07 destroy가 도는 중에 컴퓨터를 껐다. 네트워크가 끊겨 AWS 호출(DNS 조회)이 실패했다.
+terraform은 마지막 state를 S3에 올리지 못해 `infra/prod/errored.tfstate`에 따로 저장했고, 잠금도 풀지 못했다.
+그래서 **S3의 state는 destroy 이전 것이고, 실제 AWS와 맞는 최신 state는 로컬 `errored.tfstate`에만 있다**
+(serial 110, 106개 중 25개 남음 — NAT·EIP는 삭제됐고 RDS·ALB·VPC·ECS 서비스는 남았다).
+이 상태에서 다른 작업을 하면 state가 갈라진다(forked state).
+
+**해결** — 순서가 중요하다. 잠금을 풀고, 로컬 state를 먼저 올린 뒤에 destroy를 이어 간다.
+```bash
+ps -axo pid,command | grep -i '[t]erraform'   # 아무것도 안 나와야 한다
+cd infra/prod
+terraform force-unlock d20e6b95-29f2-1df2-f74d-d95989622af0
+terraform state push errored.tfstate
+cd ../.. && ./scripts/full-destroy-prod.sh --drop-dev-db
+```
+destroy가 끝나면 `errored.tfstate`를 지운다. 남겨 두면 나중에 같은 파일을 다시 올리는 사고가 날 수 있다.
+
+**재발 방지** — destroy·apply 중에는 컴퓨터를 끄거나 잠자기에 들게 하지 않는다. 끝까지(`Destroy complete!`) 본다.
+**잠금 오류가 나면 바로 `force-unlock`하지 말고, `infra/prod/errored.tfstate`가 있는지부터 본다.** 있으면 그게 최신 state다.
+잠금만 풀고 S3의 옛 state로 다시 돌리면 이미 지운 리소스를 기준으로 계획이 세워진다.
+
+---
+
+## G-10. 로컬 k6 setup이 401 — `.env`가 compose 기본 관리자 해시를 덮어쓴다
+
+**증상** — plan 0012 로컬 검증에서 `capacity.js`의 setup이 첫 링크 생성부터 실패했다(2026-10-08).
+```
+Error: 링크 생성 실패: 401 {"error":{"code":"unauthorized","message":"관리자 토큰이 필요합니다"}}
+```
+
+**원인** — `docker-compose.yml`의 `ADMIN_TOKEN_SHA256: ${ADMIN_TOKEN_SHA256:-<dev-token 해시>}`는 기본값일 뿐이다.
+저장소 루트 `.env`(gitignore)에 `ADMIN_TOKEN_SHA256`이 있으면 compose가 그 값을 쓴다. 그래서 `dev-token`은 틀린 토큰이 된다.
+README가 `-e ADMIN_TOKEN=dev-token`을 기본처럼 안내한 게 잘못이었다.
+
+**해결** — 로컬도 운영과 같이 토큰을 `read -rs`로 받는다(`load/k6/README.md` 로컬 검증).
+```bash
+read -rs "ADMIN_TOKEN?관리자 토큰: "; echo
+ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e BASE_URL=http://localhost:8080 ... load/k6/capacity.js
+```
+
+**재발 방지** — 로컬 401이면 먼저 `.env`에 `ADMIN_TOKEN_SHA256`이 있는지 본다(값은 찍지 않는다).
+```bash
+grep -c '^ADMIN_TOKEN_SHA256=' .env   # 1이면 .env의 해시가 쓰인다 → 그 토큰을 넣는다
+```

@@ -99,6 +99,24 @@ variable "admin_token_sha256" {
   }
 }
 
+variable "rate_limit_exempt_ips" {
+  description = "레이트리밋 예외 IPv4(쉼표 구분). 한계 측정(plan 0012) 동안 측정 클라이언트만 풀어 준다. tfvars에 쓰지 않고 측정 apply의 -var로만 준다."
+  type        = string
+  default     = ""
+  # 측정 클라이언트의 집 IP다. plan 출력이 공개 PR에 붙으므로 값이 찍히지 않게 한다.
+  sensitive = true
+
+  # 잘못된 값이 기동 실패 → 서킷브레이커 롤백까지 가지 않고 plan에서 걸리게 한다.
+  # 앱(RATE_LIMIT_EXEMPT_IPS)은 IPv6도 받지만, 측정 IP는 checkip.amazonaws.com의 IPv4라 여기서는 IPv4만 허용한다.
+  validation {
+    condition = var.rate_limit_exempt_ips == "" || alltrue([
+      for ip in split(",", var.rate_limit_exempt_ips) :
+      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$", ip))
+    ])
+    error_message = "rate_limit_exempt_ips는 빈 값이거나 쉼표로 구분한 IPv4 목록(공백 없이)이어야 한다."
+  }
+}
+
 variable "log_level" {
   description = "앱 LOG_LEVEL."
   type        = string

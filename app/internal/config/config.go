@@ -57,6 +57,9 @@ type Config struct {
 	// 관리자 토큰의 SHA-256 해시 (ADMIN_TOKEN_SHA256, 16진수 64자). 비어 있으면 nil이고
 	// 관리자 기능(링크 생성·요청 승인)이 꺼진다(plan 0011). 토큰 원문은 서버에 두지 않는다.
 	AdminTokenSHA256 []byte
+	// 레이트리밋을 건너뛰는 클라이언트 IP 목록 (RATE_LIMIT_EXEMPT_IPS, 쉼표 구분). 정규화된 형태로 담는다.
+	// 한계 측정(plan 0012) 동안 측정 클라이언트 한 대만 풀어 주려고 둔다. 평시에는 비어 있다(nil).
+	RateLimitExemptIPs []string
 	// 잘못돼서 무시한 DB_CONN_MAX_LIFETIME 원문. 비어 있으면 정상이다.
 	// 값이 있으면 기동 로그가 그 사실을 함께 남긴다 — 이 경고를 Load 안에서 바로 찍으면
 	// 구조화 로거 설정 전이라 JSON도 task_id도 붙지 않는다.
@@ -130,6 +133,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	exemptIPs, err := parseExemptIPs(os.Getenv("RATE_LIMIT_EXEMPT_IPS"))
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Port:            getEnv("APP_PORT", "8080"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
@@ -144,7 +152,28 @@ func Load() (Config, error) {
 		ConnMaxLifetime:         connMaxLifetime,
 		ConnMaxLifetimeRejected: rejectedLifetime,
 		AdminTokenSHA256:        adminHash,
+		RateLimitExemptIPs:      exemptIPs,
 	}, nil
+}
+
+// parseExemptIPs는 RATE_LIMIT_EXEMPT_IPS를 IP 목록으로 해석한다.
+// 레이트리밋의 clientIP와 같은 정규화(net.ParseIP → String)를 거쳐야 정확히 일치 비교가 된다.
+// 값이 있는데 IP가 아닌 항목이 있으면 기동을 막는다 — 오타가 조용히 "예외 없음"이 되면
+// 측정이 429로 막힌 이유를 찾기 어렵다. 오류 문구에 원문을 넣지 않는다(측정 클라이언트의 집 IP다).
+func parseExemptIPs(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	ips := make([]string, 0, len(parts))
+	for i, p := range parts {
+		ip := net.ParseIP(strings.TrimSpace(p))
+		if ip == nil {
+			return nil, fmt.Errorf("RATE_LIMIT_EXEMPT_IPS의 %d번째 항목이 IP가 아닙니다", i+1)
+		}
+		ips = append(ips, ip.String())
+	}
+	return ips, nil
 }
 
 // parseAdminTokenHash는 ADMIN_TOKEN_SHA256을 32바이트로 해석한다.
