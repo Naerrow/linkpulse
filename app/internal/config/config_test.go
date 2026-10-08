@@ -324,6 +324,43 @@ func TestParseAdminTokenHash(t *testing.T) {
 	}
 }
 
+// TestParseExemptIPs는 레이트리밋 예외 IP 해석을 본다(plan 0012).
+// 빈 값은 "예외 없음"이고, 결과는 clientIP와 같은 정규화 형태여야 정확히 일치 비교가 된다.
+func TestParseExemptIPs(t *testing.T) {
+	for _, in := range []string{"", "  "} {
+		if ips, err := parseExemptIPs(in); err != nil || ips != nil {
+			t.Errorf("parseExemptIPs(%q) = %v, %v, want nil, nil", in, ips, err)
+		}
+	}
+	ips, err := parseExemptIPs(" 198.51.100.7 ,2001:DB8::1")
+	if err != nil {
+		t.Fatalf("예상치 못한 에러: %v", err)
+	}
+	if want := []string{"198.51.100.7", "2001:db8::1"}; strings.Join(ips, "|") != strings.Join(want, "|") {
+		t.Errorf("정규화 결과 %v, want %v", ips, want)
+	}
+	for _, in := range []string{"not-an-ip", "198.51.100.7,", "198.51.100.7/32", "198.51.100.7:8080"} {
+		if _, err := parseExemptIPs(in); err == nil {
+			t.Errorf("parseExemptIPs(%q)가 통과됨", in)
+		}
+	}
+}
+
+// TestLoadRejectsMalformedExemptIPs는 잘못된 예외 IP로 기동이 막히고, 오류 문구에 원문이 없는지 본다.
+func TestLoadRejectsMalformedExemptIPs(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("APP_ENV", "")
+	t.Setenv("ADMIN_TOKEN_SHA256", "")
+	t.Setenv("RATE_LIMIT_EXEMPT_IPS", "198.51.100.7,secret-typo")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("잘못된 RATE_LIMIT_EXEMPT_IPS인데 Load가 성공함")
+	}
+	if strings.Contains(err.Error(), "198.51.100.7") || strings.Contains(err.Error(), "secret-typo") {
+		t.Errorf("오류 문구에 원문이 들어갔다: %v", err)
+	}
+}
+
 // TestLoadRejectsMalformedAdminHash는 형식이 틀린 해시로 기동이 막히는지 본다.
 func TestLoadRejectsMalformedAdminHash(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")

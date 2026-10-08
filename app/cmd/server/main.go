@@ -25,6 +25,9 @@ import (
 // shutdownTimeout은 종료 시 진행 중 요청을 기다려 주는 최대 시간이다.
 const shutdownTimeout = 10 * time.Second
 
+// poolStatsInterval은 DB 연결 풀 통계 로그 주기다. 태스크당 분당 6줄이라 비용은 무시할 만하다.
+const poolStatsInterval = 10 * time.Second
+
 // HTTP 서버 타임아웃. 느린/유휴 연결이 커넥션·메모리를 붙잡아 리소스를 고갈시키는 것을 막는다.
 // 모든 핸들러가 1초 미만(리다이렉트·stats·create)이라 상수로 고정한다(자주 튜닝할 값 아님).
 const (
@@ -80,6 +83,11 @@ func main() {
 			os.Exit(1)
 		}
 		defer pool.Close()
+		// 풀 통계 로그(plan 0012). 이 defer가 pool.Close보다 먼저 돈다(LIFO). 취소만 하고 고루틴 종료는
+		// 기다리지 않아서, 종료와 겹친 tick이 닫힌 풀을 한 번 더 찍을 수 있다. Stats()는 Close 뒤에도 안전하다.
+		statsCtx, stopStats := context.WithCancel(context.Background())
+		defer stopStats()
+		go db.LogPoolStats(statsCtx, pool, poolStatsInterval)
 		repo = links.NewPostgresRepository(pool)
 		// readyz가 실제 DB 연결 상태를 반영하도록 핑 함수를 주입한다.
 		readiness = func(ctx context.Context) error { return pool.PingContext(ctx) }
@@ -91,6 +99,8 @@ func main() {
 	// 같은 저장소가 요청도 맡는다 — 승인이 링크와 요청을 한 트랜잭션으로 바꿔야 해서다.
 	reqSvc := links.NewRequestService(repo, cfg.ShortCodeLength)
 	slog.Info("관리자 기능", "admin_enabled", cfg.AdminTokenSHA256 != nil)
+	// 예외 IP는 개수만 남긴다 — 측정 클라이언트의 집 IP라 로그에 찍지 않는다(plan 0012).
+	slog.Info("레이트리밋", "rate_limit_exempt_count", len(cfg.RateLimitExemptIPs))
 
 	handler := httpapi.NewRouter(httpapi.RouterDeps{
 		Links:            linkSvc,
@@ -98,7 +108,8 @@ func main() {
 		AdminTokenSHA256: cfg.AdminTokenSHA256,
 		BaseURL:          cfg.PublicBaseURL,
 		Readiness:        readiness,
-		// RateLimit 미지정 = zero-value → 운영 기본값 적용(httpapi/ratelimit.go의 default* 상수).
+		// 예외 IP 외의 한도 필드는 zero-value → 운영 기본값 적용(httpapi/ratelimit.go의 default* 상수).
+		RateLimit: httpapi.RateLimitConfig{ExemptIPs: cfg.RateLimitExemptIPs},
 	})
 	srv := newServer(cfg, handler)
 
