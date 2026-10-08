@@ -106,38 +106,57 @@ unset ADMIN_TOKEN; docker compose down
 ### 운영 측정 [사람]
 
 측정 창은 2시간 안쪽이다(plan 0012 단계 6). 집 IP는 화면·로그·문서 어디에도 찍지 않는다.
+명령 블록에는 주석을 넣지 않았다 — zsh 대화형 셸은 `#`을 인자로 넘긴다(ops-gotchas G-3). 설명은 블록 밖에 둔다.
+모든 블록은 저장소 루트에서, **main을 받아 둔 상태**로 실행한다(측정 코드와 tf 변수가 main에 있어야 한다).
+
+**1) 인프라 켜기(main 이미지).** 스크립트가 확인 문구를 두 번 묻고, 중간에 배포 성공을 기다린다.
 
 ```bash
-# 1) 인프라 켜기(main 이미지)
 ./scripts/full-apply-prod.sh --trigger-deploy
+```
 
-# 2) 측정 예외 + SMS 끄기 → 새 태스크 정의를 서비스에 반영. IP가 비면 apply까지 가지 않는다
-MYIP=$(curl -fsS https://checkip.amazonaws.com) && [[ -n "$MYIP" ]] && \
-  terraform -chdir=infra/prod apply -var=ecr_force_delete=false -var "rate_limit_exempt_ips=$MYIP" -var "alarm_sms_number="
-gh workflow run deploy.yml --ref main   # 성공할 때까지 기다린다
+**2) 측정 예외 + SMS 끄기, 그리고 새 태스크 정의를 서비스에 반영.** IP가 비면 apply까지 가지 않는다.
+apply는 태스크 정의 revision만 새로 등록한다(서비스는 `ignore_changes`). 배포 워크플로가 그 revision을 기준으로 실제 이미지를 띄운다.
 
-# 3) 확인 — IP가 아니라 개수만 찍힌다. 1)의 태스크는 0, 2)의 배포 뒤 태스크는 1이어야 한다
-#    (container_definitions가 sensitive라 plan에서는 env 차이가 가려진다. 이 기동 로그가 실제 확인이다)
-aws logs tail /ecs/linkpulse-prod-app --since 30m --region ap-northeast-2 \
-  | grep -E 'rate_limit_exempt_count|"db pool"' | tail -6
+```bash
+MYIP=$(curl -fsS https://checkip.amazonaws.com) && [[ -n "$MYIP" ]] && terraform -chdir=infra/prod apply -var=ecr_force_delete=false -var "rate_limit_exempt_ips=$MYIP" -var "alarm_sms_number="
+gh auth switch --user Naerrow && gh workflow run deploy.yml --ref main
+```
 
-# 4) 시나리오마다 실행(spread → hot → read, 사이 5분 휴식). 노트북 CPU를 활동 모니터로 함께 보고, 단계마다 k6 프로세스 CPU를 따로 적는다(판정 0번)
-#    1600 rps면 k6가 CSV를 초당 약 2만 행 gzip으로 쓴다. 발생기가 포화하면 CSV 출력이 첫 용의자다
-ulimit -n 10240   # macOS 기본 256개로는 VU 500개의 연결을 못 연다 — 발생기 오류가 서버 한계처럼 보인다
+배포 워크플로가 성공할 때까지 기다린다(`gh run watch` 또는 Actions 화면).
+
+**3) 확인.** IP가 아니라 개수만 찍힌다. 1)의 태스크는 0, 2)의 배포 뒤 태스크는 1이어야 한다.
+`container_definitions`가 sensitive라 plan에서는 env 차이가 가려진다 — 이 기동 로그가 실제 확인이다.
+
+```bash
+aws logs tail /ecs/linkpulse-prod-app --since 30m --region ap-northeast-2 | grep -E 'rate_limit_exempt_count|"db pool"' | tail -6
+```
+
+**4)·5) 시나리오 3개를 차례로 실행하고 수집한다.** 한 셸에서 블록 전체를 붙여 넣는다. 약 75분 걸린다.
+- 실행이 끝나면 3분 기다렸다가 수집한다(지표·로그가 늦게 들어온다). 그다음 2분 더 쉬어 지표 구간을 나눈다.
+- setup이 실패하면(시작 epoch 줄이 없으면) 거기서 멈춘다. 대개 예외 IP가 안 맞아 링크 생성이 429로 막힌 것이다.
+- `ulimit -n 10240`: macOS 기본 256개로는 VU 500개의 연결을 못 연다. 그러면 발생기 오류가 서버 한계처럼 보인다.
+- 노트북 CPU를 활동 모니터로 함께 보고, 단계(3분)마다 k6 프로세스 CPU를 따로 적는다(판정 0번).
+  1600 rps면 k6가 CSV를 초당 약 2만 행 gzip으로 쓴다. 발생기가 포화하면 CSV 출력이 첫 용의자다.
+
+```bash
+ulimit -n 10240
 read -rs "ADMIN_TOKEN?관리자 토큰: "; echo
-S=spread
-ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e SCENARIO=$S --out csv=load/k6/results/raw/0012-$S.csv.gz \
-  load/k6/capacity.js 2>&1 | tee load/k6/results/raw/0012-$S.log
-
-# 5) 실행이 끝나고 3분 뒤(지표·로그가 늦게 들어온다)
-load/k6/collect-metrics.sh "$(grep -o 'epoch=[0-9]*' load/k6/results/raw/0012-$S.log | cut -d= -f2)" \
-  load/k6/results/raw/0012-$S.csv.gz | tee load/k6/results/raw/0012-$S-metrics.md
-# → S=hot, S=read로 4)의 k6 줄과 5)를 반복한다
-
-# 6) 끄기 — "Destroy complete!"까지 컴퓨터를 끄지 않는다(ops-gotchas G-9). 수집은 그 전에 끝낸다(로그 그룹이 지워진다)
+for S in spread hot read; do
+  ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e SCENARIO=$S --out csv=load/k6/results/raw/0012-$S.csv.gz load/k6/capacity.js 2>&1 | tee load/k6/results/raw/0012-$S.log
+  grep -q 'epoch=' load/k6/results/raw/0012-$S.log || { echo "$S setup 실패 — 멈춘다"; break; }
+  sleep 180
+  load/k6/collect-metrics.sh "$(grep -o 'epoch=[0-9]*' load/k6/results/raw/0012-$S.log | cut -d= -f2)" load/k6/results/raw/0012-$S.csv.gz | tee load/k6/results/raw/0012-$S-metrics.md
+  sleep 120
+done
 unset ADMIN_TOKEN MYIP
+```
+
+**6) 끄기.** 수집이 다 끝난 뒤에 한다(destroy하면 로그 그룹이 지워진다). `Destroy complete!`까지 컴퓨터를 끄지 않는다(ops-gotchas G-9).
+
+```bash
 ./scripts/full-destroy-prod.sh --drop-dev-db
 ```
 
-실행마다 남길 것: k6 요약(`redirects_302`·`status_5xx`·`dropped_iterations`), `DB 클릭 합계` 줄, `collect-metrics.sh` 표.
+실행마다 남는 것: `load/k6/results/raw/0012-<시나리오>.log`(k6 요약·`DB 클릭 합계`), `.csv.gz`, `-metrics.md`(수집 표).
 "302 수 > DB 합계"일 때만 클릭 유실로 본다. abort로 끝난 실행은 진행 중 요청이 끊겨 DB 합계가 더 클 수 있다.
