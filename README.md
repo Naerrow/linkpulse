@@ -33,7 +33,8 @@ Built and operated as a production service, with a focus on reliability and obse
 - 관측성: CloudWatch(구조화 로깅·지표·알람)
 
 > 진행 단계: **P0~P4 완료(2026-10-07, Redis 캐시만 P5로 이관)** — 클라우드(ECS Fargate) 단독 운영 체계를 갖췄다.
-> 다음은 P5: EKS·ArgoCD·Prometheus/Grafana, 홈랩(k3s) 하이브리드.
+> 다음은 **P5 AWS 완성**(한계 측정 → 클릭 집계 비동기화 → EKS·ArgoCD → Prometheus/Grafana) → **P6 하이브리드**(홈랩 k3s + VPN)
+> → **P7 온프레미스**(전부 집으로 이전). 최종적으로 셋 사이를 양방향으로 자유롭게 이전할 수 있게 만든다.
 
 ## 운영 (operations)
 
