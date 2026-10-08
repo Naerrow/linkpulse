@@ -32,6 +32,9 @@ services:
       # 내 비밀번호로 바꾸려면 저장소 루트의 .env(gitignore됨)에 ADMIN_TOKEN_SHA256=<해시>를 넣는다 —
       # 이 파일은 공개 저장소에 올라가므로 진짜 비밀번호의 해시를 여기 적지 않는다.
       ADMIN_TOKEN_SHA256: ${ADMIN_TOKEN_SHA256:-c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b2001363002b37712}
+      # 레이트리밋 예외 IP(plan 0012 한계 측정). 평시 비어 있다. 로컬에는 ALB가 없어 k6가 LOCAL_XFF로
+      # 같은 IP를 X-Forwarded-For에 넣어야 맞는다(load/k6/README.md). 문서용 IP(198.51.100.7)를 쓴다.
+      RATE_LIMIT_EXEMPT_IPS: ${RATE_LIMIT_EXEMPT_IPS:-}
     ports:
       # 호스트 8080이 다른 프로세스(예: Apache)와 충돌하면 APP_HOST_PORT로 바꿔 띄운다:
       #   APP_HOST_PORT=8088 docker compose up --build
