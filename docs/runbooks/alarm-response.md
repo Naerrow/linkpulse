@@ -187,6 +187,36 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 - **복구**: 앱 풀 상한 하향·유휴 타임아웃 설정 후 배포, 급하면 **R-3**(재기동으로 연결 리셋).
 - **튜닝**: 파라미터그룹의 실제 max_connections 확인 후 임계 보정(ADR 0002 — 초기값 근사치).
 
+### §14 `linkpulse-prod-clicks-oldest-age` — 클릭 큐의 가장 오래된 배치가 5분 넘게 대기
+
+- **의미**: 워커가 클릭 배치를 반영하지 못하고 있다(plan 0013). 리다이렉트는 정상이지만 링크 통계의 클릭 수가 늘지 않는다.
+  배치는 큐에 쌓여 있으므로 원인이 풀리면 워커가 알아서 반영한다. 중복은 앱이 배치 ID로 거른다.
+- **먼저**: 앱 로그에서 어느 단계가 막혔는지 본다.
+  ```bash
+  aws logs tail /ecs/linkpulse-prod-app --since 15m --region ap-northeast-2 | grep -E '"click queue"|클릭 (반영|수신|발행) 실패' | tail -20
+  ```
+  - `클릭 반영 실패`가 이어짐 → DB 문제다. 0-2의 `/readyz`를 보고 §3의 "DB 연결 실패" 경로로 간다.
+  - `클릭 수신 실패`가 이어짐 → SQS에 닿지 못한다(태스크 역할 IAM `click-queue`, NAT, SQS 장애).
+  - `click queue` 줄조차 없음 → 태스크가 없다. §8로 간다.
+- **복구**: 원인만 고치면 된다. 같은 배치가 5번 실패하면(약 2.5분) DLQ로 옮겨진다 → §15.
+
+### §15 `linkpulse-prod-clicks-dlq-depth` — 클릭 DLQ에 배치가 들어옴
+
+- **의미**: 배치가 반영에 5번 실패했거나(약 2.5분 넘는 DB 장애) 본문이 깨졌다. **그 배치의 클릭은 아직 DB에 없다.**
+- **먼저**: 몇 개인지와 이유를 본다. 로그의 `클릭 반영 실패`에 `reason=decode`가 있으면 깨진 본문이다 — 재처리해도 다시 DLQ로 온다.
+  ```bash
+  DLQ_URL=$(aws sqs get-queue-url --queue-name linkpulse-prod-clicks-dlq --region ap-northeast-2 --query QueueUrl --output text)
+  aws sqs get-queue-attributes --queue-url "$DLQ_URL" --attribute-names ApproximateNumberOfMessages QueueArn --region ap-northeast-2
+  ```
+- **복구 [사람]**: 원인(DB 장애)이 풀렸는지 `/readyz` 200으로 확인한 뒤 원래 큐로 되돌린다. 목적지를 생략하면 원래 큐로 간다.
+  ```bash
+  DLQ_ARN=$(aws sqs get-queue-attributes --queue-url "$DLQ_URL" --attribute-names QueueArn --region ap-northeast-2 --query Attributes.QueueArn --output text)
+  aws sqs start-message-move-task --source-arn "$DLQ_ARN" --region ap-northeast-2
+  ```
+  재처리된 메시지는 새 메시지(새 보존 시각)로 들어간다. 워커가 반영하면 §14 알람과 함께 DLQ 깊이가 0으로 돌아온다.
+- ⚠️ **재처리한 배치가 다시 DLQ로 오면 원인부터 고친다.** 앱은 반영한 배치 ID를 21일 동안 기억한다(`click_batches`).
+  같은 배치를 처음 보낸 뒤 21일이 지나 다시 넣으면 이미 반영된 배치를 두 번 셀 수 있다.
+
 ---
 
 ## SEV-1 (크로스리전 — us-east-1)

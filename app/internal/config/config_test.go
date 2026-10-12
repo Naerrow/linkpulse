@@ -114,7 +114,7 @@ func TestResolveDatabaseURL_PasswordOnlyIsError(t *testing.T) {
 func TestLoad_AppEnvGuard(t *testing.T) {
 	// dbKeys는 각 케이스 시작 시 초기화할 DB 관련 env(프로세스 환경 오염 차단).
 	dbKeys := []string{"DATABASE_URL", "DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_PORT", "DB_SSLMODE", "APP_ENV",
-		"DB_SECRET_ARN", "AWS_REGION", "DB_CONN_MAX_LIFETIME"}
+		"DB_SECRET_ARN", "AWS_REGION", "DB_CONN_MAX_LIFETIME", "CLICK_QUEUE_URL"}
 
 	cases := []struct {
 		name    string
@@ -128,11 +128,12 @@ func TestLoad_AppEnvGuard(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "production + 완전한 DB_* + 회전 env → 정상(운영 실경로)", // (b)
+			name: "production + 완전한 DB_* + 회전 env + 클릭 큐 → 정상(운영 실경로)", // (b)
 			env: map[string]string{
 				"APP_ENV": "production",
 				"DB_HOST": "h", "DB_USER": "u", "DB_PASSWORD": "pw", "DB_NAME": "n",
 				"DB_SECRET_ARN": testSecretARN, "AWS_REGION": "ap-northeast-2",
+				"CLICK_QUEUE_URL": testClickQueueURL,
 			},
 			check: func(t *testing.T, cfg Config) {
 				if cfg.AppEnv != "production" {
@@ -141,7 +142,20 @@ func TestLoad_AppEnvGuard(t *testing.T) {
 				if cfg.DatabaseURL == "" {
 					t.Error("DB_*로 DatabaseURL이 조립되어야 한다")
 				}
+				if cfg.ClickQueueURL != testClickQueueURL {
+					t.Errorf("ClickQueueURL = %q", cfg.ClickQueueURL)
+				}
 			},
+		},
+		{
+			// 큐 설정이 빠진 태스크 정의로 새 이미지가 뜨면 메모리 큐로 조용히 돌지 않고 기동에서 멈춘다(plan 0013).
+			name: "production + 클릭 큐 누락 → 에러", // (b-1)
+			env: map[string]string{
+				"APP_ENV": "production",
+				"DB_HOST": "h", "DB_USER": "u", "DB_PASSWORD": "pw", "DB_NAME": "n",
+				"DB_SECRET_ARN": testSecretARN, "AWS_REGION": "ap-northeast-2",
+			},
+			wantErr: true,
 		},
 		{
 			// DATABASE_URL 경로는 비밀번호를 DSN 안에만 두고 cfg.DBPassword를 비워 둔다.
@@ -368,5 +382,32 @@ func TestLoadRejectsMalformedAdminHash(t *testing.T) {
 	t.Setenv("ADMIN_TOKEN_SHA256", "not-a-hash")
 	if _, err := Load(); err == nil {
 		t.Fatal("잘못된 ADMIN_TOKEN_SHA256인데 Load가 성공함")
+	}
+}
+
+// testClickQueueURL은 테스트용 SQS 큐 URL이다(계정 ID는 0으로 채운 가짜).
+const testClickQueueURL = "https://sqs.ap-northeast-2.amazonaws.com/000000000000/linkpulse-prod-clicks"
+
+// TestValidateClickQueueURL은 클릭 큐 설정 규칙을 본다(plan 0013).
+// 운영에서 비면 막고(메모리 큐 폴백 금지), 값이 있으면 https URL과 리전이 있어야 한다.
+func TestValidateClickQueueURL(t *testing.T) {
+	const good = testClickQueueURL
+	cases := []struct {
+		name, env, raw, region string
+		wantErr                bool
+	}{
+		{"로컬 빈 값은 메모리 큐", "", "", "", false},
+		{"운영 빈 값은 오류", envProduction, "", "ap-northeast-2", true},
+		{"운영 정상", envProduction, good, "ap-northeast-2", false},
+		{"http는 오류", "", "http://sqs.local/q", "ap-northeast-2", true},
+		{"URL 아님", "", "linkpulse-prod-clicks", "ap-northeast-2", true},
+		{"리전 없음", "", good, "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := validateClickQueueURL(c.env, c.raw, c.region); (err != nil) != c.wantErr {
+				t.Errorf("err = %v, wantErr %v", err, c.wantErr)
+			}
+		})
 	}
 }

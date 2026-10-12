@@ -76,7 +76,7 @@ func TestCreateLinkRequiresAdmin(t *testing.T) {
 func TestAdminDisabledWhenHashEmpty(t *testing.T) {
 	repo := links.NewMemoryRepository()
 	router := NewRouter(RouterDeps{
-		Links:     links.NewService(repo, 7),
+		Links:     links.NewService(repo, 7, &recordedClicks{}),
 		Requests:  links.NewRequestService(repo, 7),
 		BaseURL:   testBaseURL,
 		RateLimit: RateLimitConfig{Disabled: true},

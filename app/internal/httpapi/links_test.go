@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -98,30 +99,29 @@ func TestRedirectNotFound(t *testing.T) {
 	}
 }
 
-// TestStatsCountsClicks는 리다이렉트 후 stats의 clicks가 증가하는지 확인한다.
-func TestStatsCountsClicks(t *testing.T) {
-	router := newTestRouter()
+// TestRedirectRecordsClicks는 리다이렉트가 클릭 기록기를 부르는지 확인한다.
+func TestRedirectRecordsClicks(t *testing.T) {
+	repo := links.NewMemoryRepository()
+	clicks := &recordedClicks{}
+	router := NewRouter(RouterDeps{
+		Links:            links.NewService(repo, 7, clicks),
+		Requests:         links.NewRequestService(repo, 7),
+		AdminTokenSHA256: testAdminTokenHash(),
+		BaseURL:          testBaseURL,
+		RateLimit:        RateLimitConfig{Disabled: true},
+	})
 	link := createLink(t, router, "https://example.com")
 
-	// 두 번 리다이렉트 → 클릭 2.
+	// 두 번 리다이렉트 → 기록 두 번. DB 반영은 큐 뒤의 워커가 비동기로 한다(plan 0013).
 	for i := 0; i < 2; i++ {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/"+link.Code, nil)
-		router.ServeHTTP(rec, req)
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+link.Code, nil))
+		if rec.Code != http.StatusFound {
+			t.Fatalf("리다이렉트 status = %d, want %d", rec.Code, http.StatusFound)
+		}
 	}
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/links/"+link.Code, nil)
-	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	var body linkResponse
-	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-		t.Fatalf("응답 디코딩 실패: %v", err)
-	}
-	if body.Clicks != 2 {
-		t.Errorf("clicks = %d, want 2", body.Clicks)
+	if got, want := clicks.recorded(), []string{link.Code, link.Code}; !slices.Equal(got, want) {
+		t.Errorf("기록 = %v, want %v", got, want)
 	}
 }
 
@@ -135,8 +135,6 @@ func (r failingRepo) Create(context.Context, string, string) (links.Link, error)
 func (r failingRepo) Get(context.Context, string) (links.Link, error) {
 	return links.Link{}, r.err
 }
-
-func (r failingRepo) IncrementClicks(context.Context, string) error { return r.err }
 
 func (r failingRepo) SetDisabled(context.Context, string, bool) (links.Link, error) {
 	return links.Link{}, r.err
@@ -155,7 +153,7 @@ func TestRedirectRepositoryFailureLogsCause(t *testing.T) {
 
 	const cause = "DB 연결 끊김"
 	router := NewRouter(RouterDeps{
-		Links:     links.NewService(failingRepo{err: errors.New(cause)}, 7),
+		Links:     links.NewService(failingRepo{err: errors.New(cause)}, 7, &recordedClicks{}),
 		BaseURL:   testBaseURL,
 		RateLimit: RateLimitConfig{Disabled: true},
 	})

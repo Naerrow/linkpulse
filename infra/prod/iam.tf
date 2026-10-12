@@ -60,3 +60,21 @@ resource "aws_iam_role_policy" "ecs_task_secrets" {
   role   = aws_iam_role.ecs_task.id
   policy = data.aws_iam_policy_document.ecs_task_secrets.json
 }
+
+# plan 0013: 앱이 클릭 배치를 보내고(Batcher) 받아서 지운다(Worker). 클릭 큐 하나로만 한정한다.
+# GetQueueAttributes는 주지 않는다 — 앱은 큐 속성을 읽지 않고, 큐 지표는 사람이 CloudWatch에서 본다.
+# DLQ에는 권한이 없다. DLQ 재처리는 사람이 CLI로 한다(docs/runbooks/alarm-response.md).
+# SSE는 SQS 관리 키라 KMS 권한이 필요 없다.
+data "aws_iam_policy_document" "ecs_task_clicks" {
+  statement {
+    sid       = "ClickQueueSendReceiveDelete"
+    actions   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage"]
+    resources = [aws_sqs_queue.clicks.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_task_clicks" {
+  name   = "click-queue"
+  role   = aws_iam_role.ecs_task.id
+  policy = data.aws_iam_policy_document.ecs_task_clicks.json
+}

@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Naerrow/linkpulse/app/internal/clicks"
+	"github.com/Naerrow/linkpulse/app/internal/clicks/sqsqueue"
 	"github.com/Naerrow/linkpulse/app/internal/config"
 	"github.com/Naerrow/linkpulse/app/internal/db"
 	"github.com/Naerrow/linkpulse/app/internal/dbcreds"
@@ -27,6 +29,15 @@ const shutdownTimeout = 10 * time.Second
 
 // poolStatsInterval은 DB 연결 풀 통계 로그 주기다. 태스크당 분당 6줄이라 비용은 무시할 만하다.
 const poolStatsInterval = 10 * time.Second
+
+// plan 0013 클릭 파이프라인.
+const (
+	// clickStatsInterval은 "click queue" 통계 로그 주기다(db pool 로그와 같다).
+	clickStatsInterval = 10 * time.Second
+	// finalFlushTimeout은 종료 때 마지막 클릭 발행의 상한이다(SDK 재시도 포함).
+	// HTTP 종료(최대 shutdownTimeout 10초) + 이 값 + 워커 중지가 ECS의 SIGKILL(30초) 안에 든다.
+	finalFlushTimeout = 5 * time.Second
+)
 
 // HTTP 서버 타임아웃. 느린/유휴 연결이 커넥션·메모리를 붙잡아 리소스를 고갈시키는 것을 막는다.
 // 모든 핸들러가 1초 미만(리다이렉트·stats·create)이라 상수로 고정한다(자주 튜닝할 값 아님).
@@ -95,7 +106,12 @@ func main() {
 		slog.Warn("DATABASE_URL 미설정 — 인메모리 저장소 사용(재시작 시 데이터 소실)")
 		repo = links.NewMemoryRepository()
 	}
-	linkSvc := links.NewService(repo, cfg.ShortCodeLength)
+	// plan 0013: 리다이렉트는 클릭을 메모리에 모으기만 하고, 1초마다 큐로 보낸다. 워커가 큐에서 받아 묶어서 반영한다.
+	clickQueue := newClickQueue(cfg)
+	clickStats := &clicks.Stats{}
+	batcher := clicks.NewBatcher(clickQueue, clickStats)
+	worker := clicks.NewWorker(clickQueue, repo, clickStats)
+	linkSvc := links.NewService(repo, cfg.ShortCodeLength, batcher)
 	// 같은 저장소가 요청도 맡는다 — 승인이 링크와 요청을 한 트랜잭션으로 바꿔야 해서다.
 	reqSvc := links.NewRequestService(repo, cfg.ShortCodeLength)
 	slog.Info("관리자 기능", "admin_enabled", cfg.AdminTokenSHA256 != nil)
@@ -112,6 +128,29 @@ func main() {
 		RateLimit: httpapi.RateLimitConfig{ExemptIPs: cfg.RateLimitExemptIPs},
 	})
 	srv := newServer(cfg, handler)
+
+	// 클릭 파이프라인. 종료는 drainClicks가 HTTP 종료 뒤에 맡는다.
+	clickCtx, stopClicks := context.WithCancel(context.Background())
+	defer stopClicks()
+	flushTicker := time.NewTicker(clicks.FlushInterval)
+	defer flushTicker.Stop()
+	go batcher.Run(clickCtx, flushTicker.C)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		worker.Run(clickCtx)
+	}()
+	pruneTicker := time.NewTicker(clicks.PruneInterval)
+	defer pruneTicker.Stop()
+	go worker.RunPrune(clickCtx, pruneTicker.C)
+	statsTicker := time.NewTicker(clickStatsInterval)
+	defer statsTicker.Stop()
+	statsDone := make(chan struct{})
+	go func() {
+		defer close(statsDone)
+		clicks.LogStats(clickCtx, clickStats, batcher.PendingCodes, statsTicker.C, slog.Default())
+	}()
+	drain := func() { drainClicks(stopClicks, batcher, finalFlushTimeout, workerDone, statsDone) }
 
 	// 서버를 고루틴에서 띄우고, 리슨 실패는 채널로 전달한다.
 	serverErr := make(chan error, 1)
@@ -134,13 +173,62 @@ func main() {
 		slog.Info("종료 신호 수신, 우아한 종료 시작")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := shutdown(srv, drain); err != nil {
 		slog.Error("우아한 종료 실패", "error", err)
 		os.Exit(1)
 	}
 	slog.Info("정상 종료 완료")
+}
+
+// newClickQueue는 CLICK_QUEUE_URL이 있으면 SQS, 없으면 메모리 큐를 만든다(config가 운영에서는 URL을 강제한다).
+// 기동 로그에는 모드만 남긴다 — 큐 URL에는 계정 ID가 들어 있다.
+func newClickQueue(cfg config.Config) clicks.Queue {
+	if cfg.ClickQueueURL == "" {
+		slog.Warn("CLICK_QUEUE_URL 미설정 — 메모리 큐 사용(프로세스 안에서만 돌고 재전달이 없다)", "click_queue", "memory")
+		return clicks.NewMemoryQueue()
+	}
+	q, err := sqsqueue.New(context.Background(), cfg.ClickQueueURL, cfg.AWSRegion)
+	if err != nil {
+		slog.Error("클릭 큐(SQS) 설정 실패", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("클릭 큐", "click_queue", "sqs")
+	return q
+}
+
+// flusher는 drainClicks가 쓰는 Batcher의 부분이다. 테스트가 가짜로 바꿔 끼운다.
+type flusher interface {
+	Flush(ctx context.Context) error
+	PendingCodes() int
+}
+
+// drainClicks는 진행 중 요청이 끝난 뒤 클릭 파이프라인을 닫는다(plan 0013 "태스크 정상 종료: 유실 없음"의 경로).
+//
+//  1. stop — 주기 flush·워커·통계를 멈춘다. 통계 고루틴은 이때 마지막 증가분을 찍는다(HTTP가 닫혀 더는 Record가 없다).
+//  2. 마지막 flush — 상한 timeout. ECS가 SIGTERM 30초 뒤 SIGKILL하기 전에 끝나도록 잡았다.
+//  3. done이 모두 닫힐 때까지 기다린다 — 워커가 반영 중이던 배치와 통계 마지막 줄이 프로세스 종료로 잘리지 않게.
+//
+// 메모리 큐(로컬)는 워커가 먼저 멈추므로 마지막 배치는 반영되지 않는다 — SQS면 큐에 남아 다른 태스크가 반영한다.
+func drainClicks(stop func(), f flusher, timeout time.Duration, done ...<-chan struct{}) {
+	stop()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := f.Flush(ctx); err != nil {
+		slog.Error("마지막 클릭 발행 실패", "pending_codes", f.PendingCodes(), "error", err)
+	}
+	for _, d := range done {
+		<-d
+	}
+}
+
+// shutdown은 HTTP 서버를 닫고(진행 중 요청 마무리), 그 결과와 상관없이 drain을 부른다.
+// 서버 종료가 실패해도 버퍼에 남은 클릭은 내보내야 해서다(plan 0013 r1 #5). 서버 종료 오류를 돌려준다.
+func shutdown(srv interface{ Shutdown(context.Context) error }, drain func()) error {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	err := srv.Shutdown(ctx)
+	drain()
+	return err
 }
 
 // newServer는 설정과 핸들러로 타임아웃이 세팅된 HTTP 서버를 조립한다.

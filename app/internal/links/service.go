@@ -3,7 +3,6 @@ package links
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"net/url"
 	"strings"
 )
@@ -13,16 +12,24 @@ import (
 // 루프는 반드시 유한해야 하므로 한도를 둔다.
 const maxCodeAttempts = 5
 
-// Service는 링크 도메인의 비즈니스 로직을 담는다(URL 검증, 코드 발급, 클릭 집계 정책).
-// 저장소와 코드 길이는 생성자 주입으로 받는다(의존성 주입).
-type Service struct {
-	repo    Repository
-	codeLen int // 발급할 단축 코드 길이(base62 문자 수)
+// ClickRecorder는 리다이렉트 한 번을 클릭으로 기록한다(plan 0013).
+// 기록은 메모리에서 끝나야 한다 — 리다이렉트가 DB·네트워크를 기다리지 않게 하기 위해서다.
+// DB 반영은 큐 뒤의 워커가 묶어서 한다(clicks 패키지).
+type ClickRecorder interface {
+	Record(code string)
 }
 
-// NewService는 저장소와 코드 길이를 주입받아 서비스를 만든다.
-func NewService(repo Repository, codeLen int) *Service {
-	return &Service{repo: repo, codeLen: codeLen}
+// Service는 링크 도메인의 비즈니스 로직을 담는다(URL 검증, 코드 발급, 클릭 기록 정책).
+// 저장소·코드 길이·클릭 기록기는 생성자 주입으로 받는다(의존성 주입).
+type Service struct {
+	repo    Repository
+	codeLen int           // 발급할 단축 코드 길이(base62 문자 수)
+	clicks  ClickRecorder // 리다이렉트의 클릭 기록
+}
+
+// NewService는 저장소·코드 길이·클릭 기록기를 주입받아 서비스를 만든다.
+func NewService(repo Repository, codeLen int, clicks ClickRecorder) *Service {
+	return &Service{repo: repo, codeLen: codeLen, clicks: clicks}
 }
 
 // Shorten은 원본 URL을 검증·정규화한 뒤 랜덤 코드를 발급해 단축 링크를 만든다.
@@ -54,8 +61,8 @@ func (s *Service) Shorten(ctx context.Context, rawURL string) (Link, error) {
 }
 
 // Resolve는 코드를 리다이렉트 대상 링크로 바꾼다.
-// 부수효과로 클릭을 집계한다(리다이렉트가 곧 한 번의 방문이므로).
-// 집계는 베스트-에포트다: 집계가 실패해도 사용자 리다이렉트는 막지 않는다.
+// 부수효과로 클릭을 기록한다(리다이렉트가 곧 한 번의 방문이므로).
+// 기록은 메모리에서 끝나고 요청 context와 무관하다 — 클라이언트가 끊겨도 클릭은 남는다.
 func (s *Service) Resolve(ctx context.Context, code string) (Link, error) {
 	link, err := s.repo.Get(ctx, code)
 	if err != nil {
@@ -65,9 +72,8 @@ func (s *Service) Resolve(ctx context.Context, code string) (Link, error) {
 	if link.Disabled() {
 		return Link{}, ErrLinkDisabled
 	}
-	if err := s.repo.IncrementClicks(ctx, code); err != nil {
-		slog.Error("클릭 집계 실패", "code", code, "error", err)
-	}
+	// 같은 행을 리다이렉트마다 UPDATE하면 인기 링크에서 행 잠금 경합이 첫 병목이었다(0012 기준선).
+	s.clicks.Record(code)
 	return link, nil
 }
 

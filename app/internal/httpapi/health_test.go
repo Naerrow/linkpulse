@@ -15,7 +15,7 @@ import (
 // newTestReadyRouter는 레디니스 점검 함수를 주입한 라우터를 만든다.
 // newTestRouter는 Readiness가 nil이라 실패 경로를 한 번도 실행하지 않는다.
 func newTestReadyRouter(check func(ctx context.Context) error) http.Handler {
-	svc := links.NewService(links.NewMemoryRepository(), 7)
+	svc := links.NewService(links.NewMemoryRepository(), 7, &recordedClicks{})
 	return NewRouter(RouterDeps{
 		Links:     svc,
 		BaseURL:   testBaseURL,

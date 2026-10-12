@@ -29,3 +29,13 @@ CREATE TABLE IF NOT EXISTS link_requests (
 );
 -- 관리자 대기 목록(status = 'pending' ORDER BY created_at DESC)과 대기 상한 count용.
 CREATE INDEX IF NOT EXISTS link_requests_status_created ON link_requests (status, created_at DESC);
+
+-- plan 0013: 반영한 클릭 배치의 ID. 큐(SQS)는 최소 한 번 전달이라 같은 배치가 다시 올 수 있다.
+-- 반영과 같은 트랜잭션에서 여기에 ID를 넣어 두 번 세지 않는다. 21일이 지나면 워커가 지운다 —
+-- DLQ 보존 14일 + 재처리 뒤 본 큐 4일 동안 다시 들어올 수 있어서다(plan 0013 고정값 표).
+-- PK가 있어 논리 복제 조건(P6)을 지킨다.
+CREATE TABLE IF NOT EXISTS click_batches (
+    id         TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS click_batches_applied_at ON click_batches (applied_at);
