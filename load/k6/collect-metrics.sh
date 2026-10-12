@@ -76,6 +76,9 @@ aws cloudwatch get-metric-data --region "$REGION" \
   --metric-data-queries "file://$TMP/queries.json" \
   --start-time "$(iso "$START")" --end-time "$(iso "$END")" \
   --scan-by TimestampAscending --output json > "$TMP/cw.json"
+# 원본 응답을 CSV 옆에 남긴다 — 표를 다시 만들거나 숫자를 대조할 때 다시 조회하지 않아도 된다(destroy 뒤에도).
+RAW=${CSV%.csv*}
+cp "$TMP/cw.json" "$RAW-cw.json"
 
 # ---- Logs Insights(앱 로그) ----
 insights() {
@@ -95,10 +98,13 @@ insights() {
   exit 1
 }
 # wait_count·wait_ms는 줄마다 직전 줄 이후 증가분이라 합친다. tasks는 그 분에 로그를 남긴 태스크 수다.
+# 별칭을 원래 필드 이름(wait_count)과 같게 두면 Logs Insights가 결과에서 그 열을 빼 버린다 — 다른 이름을 쓴다.
 insights 'filter msg = "db pool"
-  | stats sum(wait_count) as wait_count, sum(wait_ms) as wait_ms, max(in_use) as in_use_max,
+  | stats sum(wait_count) as waits, sum(wait_ms) as waited_ms, max(in_use) as in_use_max,
           avg(in_use) as in_use_avg, count_distinct(task_id) as tasks by bin(1m)' "$TMP/pool.json"
 insights 'filter msg = "클릭 집계 실패" | stats count(*) as n by bin(1m)' "$TMP/fail.json"
+cp "$TMP/pool.json" "$RAW-pool.json"
+cp "$TMP/fail.json" "$RAW-fail.json"
 
 # ---- k6 CSV: 분마다 클라이언트 요청 수와 dropped_iterations ----
 # 앞 세 열(metric_name, timestamp, metric_value)만 쓴다. 인용부호가 들어갈 수 있는 열보다 앞이라 쉼표로 잘라도 안전하다.
@@ -118,7 +124,16 @@ echo
 jq -nr --argjson start "$START" --argjson stages "$STAGES_JSON" \
   --slurpfile cw "$TMP/cw.json" --slurpfile pool "$TMP/pool.json" \
   --slurpfile fail "$TMP/fail.json" --slurpfile k6 "$TMP/k6.json" '
-  def cwts: .[0:19] + "Z" | fromdateiso8601 | tostring;                  # "2026-10-08T12:34:00+00:00"
+  # CloudWatch 시각. CLI가 로컬 시간대로 줄 수 있다("2026-10-12T09:37:00+09:00") — 오프셋을 빼서 UTC epoch로 맞춘다.
+  def cwts:
+    if type == "number" then floor | tostring
+    else capture("^(?<dt>[0-9-]{10}T[0-9:]{8})(\\.[0-9]+)?(?<tz>Z|[+-][0-9]{2}:[0-9]{2})$") as $c
+      | ($c.dt + "Z" | fromdateiso8601)
+        - (if $c.tz == "Z" then 0
+           else ($c.tz[1:3] | tonumber) * 3600 + ($c.tz[4:6] | tonumber) * 60
+                | if $c.tz[0:1] == "-" then -. else . end end)
+      | tostring
+    end;
   def bints: .[0:10] + "T" + .[11:19] + "Z" | fromdateiso8601 | tostring; # "2026-10-08 12:34:00.000"
   def byminute: map({key: (.["bin(1m)"] | bints), value: (map_values(tonumber? // .))}) | from_entries;
   def rows($r): $r | map(map({key: .field, value: .value}) | from_entries);
@@ -149,7 +164,7 @@ jq -nr --argjson start "$START" --argjson stages "$STAGES_JSON" \
           ecs_cpu: $m.ecs_cpu[$t], ecs_cpu_max: $m.ecs_cpu_max[$t], ecs_mem: $m.ecs_mem[$t],
           rds_cpu: $m.rds_cpu[$t], rds_conn: $m.rds_conn[$t], rds_surplus: $m.rds_surplus[$t],
           wlat: ($m.rds_wlat[$t] | mul(1000)), rlat: ($m.rds_rlat[$t] | mul(1000)),
-          wait_count: $p[$t].wait_count, wait_ms: $p[$t].wait_ms,
+          wait_count: $p[$t].waits, wait_ms: $p[$t].waited_ms,
           in_use_max: $p[$t].in_use_max, in_use_avg: $p[$t].in_use_avg,
           # 연결 보유 시간(ms) = 태스크당 평균 in_use ÷ 태스크당 처리량 (Little의 법칙)
           hold_ms: ($p[$t].in_use_avg | div(($req / 60) | div($p[$t].tasks)) | mul(1000)),

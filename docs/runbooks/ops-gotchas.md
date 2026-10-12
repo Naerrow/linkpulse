@@ -303,6 +303,53 @@ ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e BASE_URL=http://localhost:8080 ... load/k6/
 ```
 
 **재발 방지** — 로컬 401이면 먼저 `.env`에 `ADMIN_TOKEN_SHA256`이 있는지 본다(값은 찍지 않는다).
+1이 나오면 `.env`의 해시가 쓰이니 그 토큰을 넣는다.
 ```bash
-grep -c '^ADMIN_TOKEN_SHA256=' .env   # 1이면 .env의 해시가 쓰인다 → 그 토큰을 넣는다
+grep -c '^ADMIN_TOKEN_SHA256=' .env
 ```
+
+---
+
+## G-11. `collect-metrics.sh`의 CloudWatch 열이 전부 `-` — CLI가 시각을 로컬 시간대로 준다
+
+**증상** — plan 0012 측정 뒤 수집 표에서 ALB·ECS·RDS 열이 모두 비었다(2026-10-12). 같은 표의 Logs Insights 열(`in_use`)은 정상이었다.
+
+**원인** — CloudWatch API가 CBOR 프로토콜이라, AWS CLI v2가 받은 epoch를 **로컬 시간대**로 바꿔 찍는다.
+```
+"Timestamps": ["2026-10-12T09:36:00+09:00", ...]
+```
+스크립트는 앞 19자만 잘라 UTC로 읽어서 모든 분이 9시간 어긋났다. Logs Insights의 `bin(1m)`은 서비스가 UTC 문자열로 줘서 영향이 없었다.
+
+**해결** — 오프셋(`+09:00`·`Z`·`-05:00`)을 반영해 UTC epoch로 바꾼다(`collect-metrics.sh`의 `cwts`). 원본 응답은 `<CSV 이름>-cw.json`으로 남긴다.
+
+**재발 방지** — AWS CLI 출력의 시각은 문자열 그대로 비교하지 않는다. 오프셋까지 해석하거나 `--start-time`처럼 epoch로 맞춘다.
+
+---
+
+## G-12. Logs Insights `stats sum(x) as x` — 별칭이 필드 이름과 같으면 그 열이 결과에서 빠진다
+
+**증상** — 같은 수집에서 풀 대기 열(`wait_count`·`wait_ms` 합계)만 비었다. 원본 응답에 `in_use_max`·`in_use_avg`·`tasks`는 있고 대기 합계는 아예 없었다.
+
+**원인** — 쿼리가 `stats sum(wait_count) as wait_count, sum(wait_ms) as wait_ms`였다. 별칭이 원래 필드 이름과 같은 열만 빠졌다(`max(in_use) as in_use_max`처럼 이름이 다른 열은 나왔다).
+
+**해결** — 별칭을 `waits`·`waited_ms`로 바꿨다. 다음 수집에서 값이 채워졌다.
+
+**재발 방지** — Logs Insights 집계 별칭은 원래 필드 이름과 다르게 짓는다.
+
+---
+
+## G-13. 새 터미널 탭에 붙여 넣은 명령 앞뒤에 `[200~`·`~`가 붙었다
+
+**증상** — 새 탭에 두 줄을 붙여 넣자 이렇게 됐다(2026-10-12).
+```
+zsh: bad pattern: [200~cd
+while>
+```
+첫 줄 `cd`가 실패해 홈 디렉터리에 남았고, 마지막이 `done~`이 돼 zsh가 `done`을 기다렸다. 아무것도 실행되지 않았다.
+
+**원인** — 터미널의 붙여넣기 표시 문자(bracketed paste)가 셸에 처리되지 않고 그대로 들어갔다.
+
+**해결** — Ctrl+C로 빠져나온 뒤 **`cd` 없이 절대경로만 쓰는 한 줄**로 다시 붙여 넣었다. 계속 섞이면 `printf '\e[?2004l'`로 그 탭의 표시 모드를 끈다.
+
+**재발 방지** — 건네는 명령은 한 줄·절대경로로 쓴다(G-3의 "상대 경로 `cd`를 블록에 넣지 않는다"와 같은 원칙).
+붙여 넣은 뒤 `while>`·`quote>` 같은 이어쓰기 프롬프트가 보이면 실행되지 않은 것이다.
