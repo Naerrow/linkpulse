@@ -92,6 +92,8 @@ done
 
 기대: 첫 grep에 `"rate_limit_exempt_count":1`과 `"msg":"db pool"` 줄. 세 실행 모두 thresholds가 ✓이고 `status_429`가 없다.
 `spread`·`hot`은 `DB 클릭 합계`가 `redirects_302` count와 같고, `read`는 `DB 클릭 합계 = 0`이다. 실행당 약 7분이다.
+plan 0013부터 클릭은 비동기로 반영된다(로컬은 메모리 큐). teardown이 합계가 멈출 때까지 기다렸다가 찍고,
+앱 로그에 10초마다 `"msg":"click queue"` 줄이 나온다(`duplicate_batches`는 0이어야 한다).
 
 예외가 안 맞을 때 바로 멈추는지도 본다. `LOCAL_XFF` 없이 `hot`으로 돌린다.
 (`spread`·`read`는 setup의 링크 100개 생성이 쓰기 한도(버스트 10)에 먼저 걸려 setup 오류로 멈춘다.)
@@ -132,24 +134,45 @@ gh auth switch --user Naerrow && gh workflow run deploy.yml --ref main
 aws logs tail /ecs/linkpulse-prod-app --since 30m --region ap-northeast-2 | grep -E 'rate_limit_exempt_count|"db pool"' | tail -6
 ```
 
-**4)·5) 시나리오 3개를 차례로 실행하고 수집한다.** 한 셸에서 블록 전체를 붙여 넣는다. 약 75분 걸린다.
+**3-1) 클릭 파이프라인 스모크(plan 0013부터).** 링크 하나에 리다이렉트 3번 → 5초 뒤 통계의 클릭이 3이어야 한다.
+`302 302 302`와 `3`이 아니면 측정하지 않고 멈춘다(큐·IAM·워커 중 하나가 막혔다 — `alarm-response.md` §14).
+
+```bash
+read -rs "ADMIN_TOKEN?관리자 토큰: "; echo
+C=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"url":"https://example.com/smoke"}' https://lpulse.live/api/links | jq -r .code); echo "code=$C"
+for i in 1 2 3; do curl -s -o /dev/null -w '%{http_code} ' https://lpulse.live/$C; done; echo
+sleep 5; curl -s https://lpulse.live/api/links/$C | jq .clicks
+aws logs tail /ecs/linkpulse-prod-app --since 2m --region ap-northeast-2 | grep '"click queue"' | tail -2
+```
+
+**4)·5) 시나리오 3개를 차례로 실행하고 수집한다.** 한 셸에서 블록 전체를 붙여 넣는다. 0012(1600까지)는 약 75분, 0013(3200까지)은 약 85분이다.
+- 첫 줄의 `P`(파일 이름에 붙는 plan 번호)와 `M`(`MAX_RPS`)을 그 측정에 맞춘다. 0012는 `P=0012; M=1600`이었다.
+- 토큰이 운영에서 통하는지(`200`) 먼저 확인하고, 통할 때만 돈다. 401이면 비밀번호 입력 실수다(한/영 확인).
 - 실행이 끝나면 3분 기다렸다가 수집한다(지표·로그가 늦게 들어온다). 그다음 2분 더 쉬어 지표 구간을 나눈다.
 - setup이 실패하면(시작 epoch 줄이 없으면) 거기서 멈춘다. 대개 예외 IP가 안 맞아 링크 생성이 429로 막힌 것이다.
 - `ulimit -n 10240`: macOS 기본 256개로는 VU 500개의 연결을 못 연다. 그러면 발생기 오류가 서버 한계처럼 보인다.
-- 노트북 CPU를 활동 모니터로 함께 보고, 단계(3분)마다 k6 프로세스 CPU를 따로 적는다(판정 0번).
-  1600 rps면 k6가 CSV를 초당 약 2만 행 gzip으로 쓴다. 발생기가 포화하면 CSV 출력이 첫 용의자다.
+- 명령은 절대경로로 써서 어느 디렉터리에서 붙여 넣어도 된다(ops-gotchas G-13).
 
 ```bash
 ulimit -n 10240
+P=0013; M=3200; R=/Users/parkjaehee/mini-project/linkpulse/load/k6
 read -rs "ADMIN_TOKEN?관리자 토큰: "; echo
-for S in spread hot read; do
-  ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e SCENARIO=$S --out csv=load/k6/results/raw/0012-$S.csv.gz load/k6/capacity.js 2>&1 | tee load/k6/results/raw/0012-$S.log
-  grep -q 'epoch=' load/k6/results/raw/0012-$S.log || { echo "$S setup 실패 — 멈춘다"; break; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN_TOKEN" https://lpulse.live/api/admin/links); echo "토큰 확인: $CODE"
+[[ $CODE == 200 ]] && for S in spread hot read; do
+  ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e SCENARIO=$S -e MAX_RPS=$M --out csv=$R/results/raw/$P-$S.csv.gz $R/capacity.js 2>&1 | tee $R/results/raw/$P-$S.log
+  grep -q 'epoch=' $R/results/raw/$P-$S.log || { echo "$S setup 실패 — 멈춘다"; break; }
   sleep 180
-  load/k6/collect-metrics.sh "$(grep -o 'epoch=[0-9]*' load/k6/results/raw/0012-$S.log | cut -d= -f2)" load/k6/results/raw/0012-$S.csv.gz | tee load/k6/results/raw/0012-$S-metrics.md
+  $R/collect-metrics.sh "$(grep -o 'epoch=[0-9]*' $R/results/raw/$P-$S.log | cut -d= -f2)" $R/results/raw/$P-$S.csv.gz $M > $R/results/raw/$P-$S-metrics.md && echo "$S 수집 완료"
   sleep 120
 done
 unset ADMIN_TOKEN MYIP
+```
+
+**발생기 CPU 기록(판정 0번).** 측정 전에 **다른 터미널 탭**에서 켜 두고, 측정이 끝나면 Ctrl+C로 멈춘다. 10초 남짓마다 시각·맥 전체 CPU %·k6 CPU %(코어 1개 = 100)를 한 줄씩 적는다.
+1600 rps면 k6가 CSV를 초당 약 2만 행 gzip으로 쓴다. 발생기가 포화하면 CSV 출력이 첫 용의자다.
+
+```bash
+L=/Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0013-cpu.log; sysctl -n hw.ncpu > $L; while true; do printf '%s %s %s\n' "$(date -u +%s)" "$(top -l 2 -n 0 -s 1 | awk '/CPU usage/ {u=$3; s=$5} END {print u+s}')" "$(ps -A -o %cpu=,comm= | awk '$2 ~ /k6$/ {s+=$1} END {print s+0}')" >> $L; sleep 8; done
 ```
 
 **6) 끄기.** 수집이 다 끝난 뒤에 한다(destroy하면 로그 그룹이 지워진다). `Destroy complete!`까지 컴퓨터를 끄지 않는다(ops-gotchas G-9).
@@ -158,5 +181,10 @@ unset ADMIN_TOKEN MYIP
 ./scripts/full-destroy-prod.sh --drop-dev-db
 ```
 
-실행마다 남는 것: `load/k6/results/raw/0012-<시나리오>.log`(k6 요약·`DB 클릭 합계`), `.csv.gz`, `-metrics.md`(수집 표).
-"302 수 > DB 합계"일 때만 클릭 유실로 본다. abort로 끝난 실행은 진행 중 요청이 끊겨 DB 합계가 더 클 수 있다.
+실행마다 남는 것: `load/k6/results/raw/<P>-<시나리오>.log`(k6 요약·`DB 클릭 합계`), `.csv.gz`, `-metrics.md`(수집 표),
+`-cw.json`·`-pool.json`·`-fail.json`·`-cq.json`·`-cons.json`(AWS 원본 응답 — destroy 뒤에도 표를 다시 만들 수 있다).
+
+클릭 정합성:
+- **0012(동기 집계):** "302 수 > DB 합계"일 때만 유실로 본다. abort로 끝난 실행은 진행 중 요청이 끊겨 DB 합계가 더 클 수 있다.
+- **0013부터(비동기):** 수집 표 맨 아래 정합성 줄로 판정한다. `recorded − dropped` = `applied + unknown` = DB 합계여야 한다.
+  클릭은 응답 전에 기록되므로 클라이언트가 302를 못 받은 요청도 DB에 들어간다. k6 쪽은 `redirects_302 ≤ DB 합계`만 본다.

@@ -6,7 +6,8 @@
 //   hot    — 링크 1개에 전부 GET /{code}                 : 인기 링크의 행 잠금 경합
 //   read   — 링크 100개에 GET /api/links/{code}(쓰기 없음) : 대조군. 쓰기를 뺀 상한
 //
-// 단계: 50 → 100 → 200 → 400 → 800 → 1600 rps, 단계마다 30초 올리고 2분 30초 유지(= 3분).
+// 단계: 50 → 100 → 200 → 400 → 800 → 1600(→ 3200) rps, 단계마다 30초 올리고 2분 30초 유지(= 3분).
+// 기본은 1600까지다(0012 재현). plan 0013 재측정은 MAX_RPS=3200으로 돌린다.
 // setup이 끝나면 다음 정각(:00초)까지 기다렸다가 시작한다. 그래서 단계마다 유지 구간이
 // CloudWatch의 온전한 1분 두 개를 덮는다(collect-metrics.sh가 이 두 분만 단계 값으로 쓴다).
 import http from 'k6/http';
@@ -22,7 +23,7 @@ const MAX_RPS = Number(__ENV.MAX_RPS || 1600);
 const XFF = __ENV.LOCAL_XFF ? { 'X-Forwarded-For': __ENV.LOCAL_XFF } : {};
 
 // collect-metrics.sh의 단계표와 같아야 한다.
-const ALL_RATES = [50, 100, 200, 400, 800, 1600];
+const ALL_RATES = [50, 100, 200, 400, 800, 1600, 3200];
 
 if (!['spread', 'hot', 'read'].includes(SCENARIO)) {
   throw new Error('SCENARIO는 spread|hot|read 중 하나여야 한다');
@@ -43,6 +44,8 @@ export const options = {
   discardResponseBodies: true,
   // 링크 생성 + 정각 맞춤(최대 1분).
   setupTimeout: '3m',
+  // 클릭 반영이 비동기라 teardown이 DB 합계가 멈출 때까지 최대 2분 기다린다(plan 0013). 기본 60초로는 모자라다.
+  teardownTimeout: '3m',
   scenarios: {
     [SCENARIO]: {
       // 열린 모델: 서버가 느려져도 요청률이 유지돼야 한계가 드러난다.
@@ -50,8 +53,10 @@ export const options = {
       exec: SCENARIO === 'read' ? 'stats' : 'redirect',
       startRate: 0,
       timeUnit: '1s',
-      // 1600 rps에서 평균 지연 약 300ms까지 버틴다. 그보다 느리면 이미 p95 기준에서 불합격이다.
-      preAllocatedVUs: 100,
+      // 1600 rps에서 평균 지연 약 300ms(3200에서 약 150ms)까지 버틴다. 그보다 느리면 이미 p95 기준에서 불합격이다.
+      // preAllocatedVUs는 0012의 100에서 200으로 올렸다(plan 0013). 0012 spread 1600에서 VU 확보가 늦어 dropped가 났다.
+      // 열린 모델이라 요청률은 같다 — 서버 부하는 바뀌지 않는다.
+      preAllocatedVUs: 200,
       maxVUs: 500,
       stages: rates.flatMap((r) => [
         { target: r, duration: '30s' },
@@ -121,17 +126,36 @@ export function stats(data) {
   count(http.get(`${BASE}/api/links/${pick(data.codes)}`, { headers: XFF, tags: { name: 'GET /api/links/{code}' } }));
 }
 
-// DB에 쌓인 클릭 합계를 찍는다. 스크립트는 메트릭 값을 읽을 수 없어서 사람이 요약의 redirects_302와 비교한다.
-// "302 수 > DB 합계"일 때만 유실이다 — abort로 끝나면 진행 중 요청이 끊겨 DB 합계가 더 클 수 있다. read는 0이 정상이다.
+// DB에 쌓인 클릭 합계를 찍는다. 스크립트는 메트릭 값을 읽을 수 없어서 사람이 요약의 redirects_302와 비교한다. read는 0이 정상이다.
+// plan 0013부터 반영이 비동기라, 합계가 6초 동안 변하지 않을 때까지(최대 2분) 기다렸다가 찍는다.
+// 정합성의 1차 판정은 서버 쪽 통계(collect-metrics.sh의 정합성 줄)다. 클릭은 응답 전에 기록되므로
+// 클라이언트가 302를 못 받은 요청(타임아웃·abort)도 DB에 들어간다 — k6 쪽은 redirects_302 ≤ DB 합계만 본다.
 export function teardown(data) {
-  let total = 0;
-  for (const code of data.codes) {
-    const res = http.get(`${BASE}/api/links/${code}`, {
-      headers: XFF,
-      responseType: 'text',
-      tags: { name: 'GET /api/links/{code}' },
-    });
-    total += res.status === 200 ? res.json('clicks') : NaN;
+  const sumClicks = () => {
+    let total = 0;
+    for (const code of data.codes) {
+      const res = http.get(`${BASE}/api/links/${code}`, {
+        headers: XFF,
+        responseType: 'text',
+        tags: { name: 'GET /api/links/{code}' },
+      });
+      total += res.status === 200 ? res.json('clicks') : NaN;
+    }
+    return total;
+  };
+  const deadline = Date.now() + 120000;
+  let last = sumClicks();
+  let stable = 0;
+  while (stable < 3 && Date.now() < deadline) {
+    sleep(2);
+    const cur = sumClicks();
+    if (cur === last) {
+      stable++;
+    } else {
+      stable = 0;
+      last = cur;
+    }
   }
-  console.log(`DB 클릭 합계 = ${total} (요약의 redirects_302 count와 비교한다)`);
+  const note = stable < 3 ? ' — 2분 안에 멈추지 않았다(반영이 밀렸다)' : '';
+  console.log(`DB 클릭 합계 = ${last} (요약의 redirects_302 count와 비교한다)${note}`);
 }
