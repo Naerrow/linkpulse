@@ -14,7 +14,7 @@ import (
 
 // newRateLimitedRouter는 지정한 리밋 설정으로 인메모리 라우터를 만든다(레이트리밋 테스트 공용).
 func newRateLimitedRouter(cfg RateLimitConfig) http.Handler {
-	svc := links.NewService(links.NewMemoryRepository(), 7)
+	svc := links.NewService(links.NewMemoryRepository(), 7, &recordedClicks{})
 	return NewRouter(RouterDeps{Links: svc, BaseURL: testBaseURL, RateLimit: cfg})
 }
 

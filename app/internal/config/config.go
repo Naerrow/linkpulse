@@ -60,6 +60,9 @@ type Config struct {
 	// 레이트리밋을 건너뛰는 클라이언트 IP 목록 (RATE_LIMIT_EXEMPT_IPS, 쉼표 구분). 정규화된 형태로 담는다.
 	// 한계 측정(plan 0012) 동안 측정 클라이언트 한 대만 풀어 주려고 둔다. 평시에는 비어 있다(nil).
 	RateLimitExemptIPs []string
+	// 클릭 큐(SQS) URL (CLICK_QUEUE_URL, plan 0013). 비면 프로세스 안의 메모리 큐를 쓴다(로컬).
+	// 운영에서는 필수다 — 태스크마다 따로 노는 메모리 큐로 조용히 뜨면 재전달도 없고 종료 때 클릭을 잃는다.
+	ClickQueueURL string
 	// 잘못돼서 무시한 DB_CONN_MAX_LIFETIME 원문. 비어 있으면 정상이다.
 	// 값이 있으면 기동 로그가 그 사실을 함께 남긴다 — 이 경고를 Load 안에서 바로 찍으면
 	// 구조화 로거 설정 전이라 JSON도 task_id도 붙지 않는다.
@@ -138,6 +141,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	clickQueueURL := os.Getenv("CLICK_QUEUE_URL")
+	if err := validateClickQueueURL(appEnv, clickQueueURL, awsRegion); err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		Port:            getEnv("APP_PORT", "8080"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
@@ -153,7 +161,28 @@ func Load() (Config, error) {
 		ConnMaxLifetimeRejected: rejectedLifetime,
 		AdminTokenSHA256:        adminHash,
 		RateLimitExemptIPs:      exemptIPs,
+		ClickQueueURL:           clickQueueURL,
 	}, nil
+}
+
+// validateClickQueueURL은 클릭 큐 설정을 확인한다(plan 0013).
+// production에서 비면 기동을 막는다(DB 미설정과 같은 fail-fast) — 서킷브레이커가 이전 리비전으로 되돌린다.
+// 값이 있으면 https URL이어야 하고, SDK 리전으로 쓸 AWS_REGION이 있어야 한다.
+func validateClickQueueURL(appEnv, raw, awsRegion string) error {
+	if raw == "" {
+		if appEnv == envProduction {
+			return errors.New("APP_ENV=production인데 CLICK_QUEUE_URL이 미설정입니다 — 메모리 큐 폴백 금지")
+		}
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return errors.New("CLICK_QUEUE_URL은 SQS 큐의 https URL이어야 합니다")
+	}
+	if awsRegion == "" {
+		return errors.New("CLICK_QUEUE_URL을 쓰려면 AWS_REGION이 필요합니다(SQS 클라이언트 리전)")
+	}
+	return nil
 }
 
 // parseExemptIPs는 RATE_LIMIT_EXEMPT_IPS를 IP 목록으로 해석한다.

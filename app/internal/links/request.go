@@ -61,6 +61,7 @@ type RequestRepository interface {
 type Store interface {
 	Repository
 	RequestRepository
+	ClickBatchRepository
 }
 
 var (

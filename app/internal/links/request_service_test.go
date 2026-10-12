@@ -11,7 +11,7 @@ import (
 // newRequestTestSetup은 같은 인메모리 저장소를 쓰는 링크·요청 서비스를 만든다.
 func newRequestTestSetup() (*Service, *RequestService, *MemoryRepository) {
 	repo := NewMemoryRepository()
-	return NewService(repo, 7), NewRequestService(repo, 7), repo
+	return NewService(repo, 7, &fakeClicks{}), NewRequestService(repo, 7), repo
 }
 
 // TestSubmitValid는 접수가 대기 상태·정규화된 URL·다듬은 메모·올바른 ID 형식을 돌려주는지 본다.

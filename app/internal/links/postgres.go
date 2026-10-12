@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -95,22 +97,67 @@ func (r *PostgresRepository) ListRecent(ctx context.Context, limit int) ([]Link,
 	return out, rows.Err()
 }
 
-// IncrementClicks는 클릭 수를 1 늘린다. 해당 코드가 없으면 ErrNotFound.
-func (r *PostgresRepository) IncrementClicks(ctx context.Context, code string) error {
-	const q = `UPDATE links SET clicks = clicks + 1 WHERE code = $1`
+// ApplyClickBatch는 배치 ID 기록과 코드별 UPDATE를 한 트랜잭션으로 한다(plan 0013).
+//
+// 중복: 배치 ID를 click_batches에 먼저 넣는다. 이미 있으면(0행) 이전에 반영한 배치라 아무것도 바꾸지 않는다.
+// 같은 배치가 두 워커에 동시에 와도 두 번째 INSERT는 첫 트랜잭션이 끝날 때까지 기다렸다가 0행이 된다.
+//
+// 교착: 두 워커가 겹치는 코드를 서로 다른 순서로 잠그면 교착이 난다. counts는 map이라 순서가 무작위이므로
+// 코드를 정렬한 순서로 UPDATE해 모든 트랜잭션이 같은 순서로 행 잠금을 잡게 한다.
+func (r *PostgresRepository) ApplyClickBatch(ctx context.Context, batchID string, counts map[string]int64) (bool, int64, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, 0, err
+	}
+	// 커밋한 뒤의 Rollback은 sql.ErrTxDone을 돌려줄 뿐 아무것도 하지 않는다.
+	defer func() { _ = tx.Rollback() }()
 
-	res, err := r.db.ExecContext(ctx, q, code)
+	res, err := tx.ExecContext(ctx, `INSERT INTO click_batches (id) VALUES ($1) ON CONFLICT DO NOTHING`, batchID)
 	if err != nil {
-		return err
+		return false, 0, err
 	}
-	n, err := res.RowsAffected()
+	inserted, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return false, 0, err
 	}
-	if n == 0 {
-		return ErrNotFound
+	if inserted == 0 {
+		return true, 0, nil
 	}
-	return nil
+
+	codes := make([]string, 0, len(counts))
+	for code := range counts {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+
+	var unknown int64
+	for _, code := range codes {
+		res, err := tx.ExecContext(ctx, `UPDATE links SET clicks = clicks + $2 WHERE code = $1`, code, counts[code])
+		if err != nil {
+			return false, 0, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return false, 0, err
+		}
+		if n == 0 {
+			unknown += counts[code]
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, err
+	}
+	return false, unknown, nil
+}
+
+// PruneClickBatches는 olderThan보다 오래 전에 반영한 배치 ID를 지운다.
+func (r *PostgresRepository) PruneClickBatches(ctx context.Context, olderThan time.Duration) (int64, error) {
+	res, err := r.db.ExecContext(ctx,
+		`DELETE FROM click_batches WHERE applied_at < now() - ($1 * interval '1 second')`, int64(olderThan.Seconds()))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // isUniqueViolation은 에러가 Postgres UNIQUE 제약 위반(SQLSTATE 23505)인지 확인한다.

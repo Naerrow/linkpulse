@@ -3,15 +3,36 @@ package links
 import (
 	"context"
 	"errors"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 )
 
 const testCodeLen = 7
 
+// fakeClicks는 Record 호출을 순서대로 모으는 가짜 클릭 기록기다(plan 0013).
+// 실제 반영은 clicks 패키지의 워커가 하므로, 서비스 테스트는 "기록을 불렀는가"만 본다.
+type fakeClicks struct {
+	mu    sync.Mutex
+	codes []string
+}
+
+func (f *fakeClicks) Record(code string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.codes = append(f.codes, code)
+}
+
+func (f *fakeClicks) recorded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.codes)
+}
+
 // TestShortenValid는 정상 URL이 설정 길이의 코드로 단축되는지 확인한다.
 func TestShortenValid(t *testing.T) {
-	svc := NewService(NewMemoryRepository(), testCodeLen)
+	svc := NewService(NewMemoryRepository(), testCodeLen, &fakeClicks{})
 
 	link, err := svc.Shorten(context.Background(), "https://example.com/page?q=1")
 	if err != nil {
@@ -30,7 +51,7 @@ func TestShortenValid(t *testing.T) {
 
 // TestShortenRejectsInvalidURL는 비-http(s)·빈 값·스킴 누락을 거부하는지 확인한다.
 func TestShortenRejectsInvalidURL(t *testing.T) {
-	svc := NewService(NewMemoryRepository(), testCodeLen)
+	svc := NewService(NewMemoryRepository(), testCodeLen, &fakeClicks{})
 	bad := []string{
 		"",
 		"   ",
@@ -47,9 +68,11 @@ func TestShortenRejectsInvalidURL(t *testing.T) {
 	}
 }
 
-// TestResolveCountsClicks는 Resolve가 대상을 돌려주면서 클릭을 집계하는지 확인한다.
-func TestResolveCountsClicks(t *testing.T) {
-	svc := NewService(NewMemoryRepository(), testCodeLen)
+// TestResolveRecordsClicks는 Resolve가 대상을 돌려주면서 클릭을 기록하는지 확인한다.
+// DB 반영은 비동기라(plan 0013) 여기서는 기록 호출만 본다.
+func TestResolveRecordsClicks(t *testing.T) {
+	clicks := &fakeClicks{}
+	svc := NewService(NewMemoryRepository(), testCodeLen, clicks)
 	ctx := context.Background()
 
 	created, err := svc.Shorten(ctx, "https://example.com")
@@ -65,20 +88,20 @@ func TestResolveCountsClicks(t *testing.T) {
 			t.Errorf("URL = %q, want %q", got.URL, "https://example.com")
 		}
 	}
-	stats, err := svc.Stats(ctx, created.Code)
-	if err != nil {
-		t.Fatalf("Stats 실패: %v", err)
-	}
-	if stats.Clicks != 3 {
-		t.Errorf("Clicks = %d, want 3", stats.Clicks)
+	if got, want := clicks.recorded(), []string{created.Code, created.Code, created.Code}; !slices.Equal(got, want) {
+		t.Errorf("기록 = %v, want %v", got, want)
 	}
 }
 
-// TestResolveNotFound는 없는 코드 Resolve가 ErrNotFound인지 확인한다.
+// TestResolveNotFound는 없는 코드 Resolve가 ErrNotFound이고 클릭을 기록하지 않는지 확인한다.
 func TestResolveNotFound(t *testing.T) {
-	svc := NewService(NewMemoryRepository(), testCodeLen)
+	clicks := &fakeClicks{}
+	svc := NewService(NewMemoryRepository(), testCodeLen, clicks)
 	if _, err := svc.Resolve(context.Background(), "nope"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+	if got := clicks.recorded(); len(got) != 0 {
+		t.Errorf("없는 코드인데 기록됨: %v", got)
 	}
 }
 
@@ -96,8 +119,7 @@ func (r *flakyRepo) Create(_ context.Context, code, destURL string) (Link, error
 	}
 	return Link{Code: code, URL: destURL}, nil
 }
-func (r *flakyRepo) Get(context.Context, string) (Link, error)     { return Link{}, ErrNotFound }
-func (r *flakyRepo) IncrementClicks(context.Context, string) error { return nil }
+func (r *flakyRepo) Get(context.Context, string) (Link, error) { return Link{}, ErrNotFound }
 func (r *flakyRepo) SetDisabled(context.Context, string, bool) (Link, error) {
 	return Link{}, ErrNotFound
 }
@@ -106,7 +128,7 @@ func (r *flakyRepo) ListRecent(context.Context, int) ([]Link, error) { return ni
 // TestShortenRetriesOnCollision은 충돌 시 새 코드로 재시도해 결국 성공하는지 확인한다.
 func TestShortenRetriesOnCollision(t *testing.T) {
 	repo := &flakyRepo{failTimes: 2} // 2번 충돌 후 3번째 성공
-	svc := NewService(repo, testCodeLen)
+	svc := NewService(repo, testCodeLen, &fakeClicks{})
 
 	if _, err := svc.Shorten(context.Background(), "https://example.com"); err != nil {
 		t.Fatalf("Shorten 실패: %v", err)
@@ -119,7 +141,7 @@ func TestShortenRetriesOnCollision(t *testing.T) {
 // TestShortenExhaustsAttempts는 계속 충돌하면 ErrCodeExhausted를 반환하는지 확인한다.
 func TestShortenExhaustsAttempts(t *testing.T) {
 	repo := &flakyRepo{failTimes: 1000} // 항상 충돌
-	svc := NewService(repo, testCodeLen)
+	svc := NewService(repo, testCodeLen, &fakeClicks{})
 
 	if _, err := svc.Shorten(context.Background(), "https://example.com"); !errors.Is(err, ErrCodeExhausted) {
 		t.Errorf("err = %v, want ErrCodeExhausted", err)
@@ -132,7 +154,8 @@ func TestShortenExhaustsAttempts(t *testing.T) {
 // TestDisabledLinkDoesNotRedirect는 중단된 링크가 이동하지 않고 클릭도 세지 않으며, 다시 켜면 돌아오는지 본다(plan 0011).
 func TestDisabledLinkDoesNotRedirect(t *testing.T) {
 	repo := NewMemoryRepository()
-	svc := NewService(repo, 7)
+	clicks := &fakeClicks{}
+	svc := NewService(repo, 7, clicks)
 	ctx := context.Background()
 
 	link, _ := svc.Shorten(ctx, "https://example.com/later-bad")
@@ -143,8 +166,8 @@ func TestDisabledLinkDoesNotRedirect(t *testing.T) {
 	if _, err := svc.Resolve(ctx, link.Code); !errors.Is(err, ErrLinkDisabled) {
 		t.Fatalf("중단 뒤 Resolve err = %v, want ErrLinkDisabled", err)
 	}
-	if got, _ := svc.Stats(ctx, link.Code); got.Clicks != 0 {
-		t.Errorf("중단된 링크의 클릭이 %d로 셌다", got.Clicks)
+	if got := clicks.recorded(); len(got) != 0 {
+		t.Errorf("중단된 링크의 클릭을 기록했다: %v", got)
 	}
 	// 다시 중단해도 처음 중단 시각을 유지한다. 시계가 확실히 움직이도록 잠깐 기다린다
 	// (두 호출이 같은 마이크로초에 끝나면 덮어써도 같은 값이라 검사가 무의미해진다).
@@ -167,7 +190,7 @@ func TestDisabledLinkDoesNotRedirect(t *testing.T) {
 
 // TestListRecentLimit은 최근 목록이 중단된 링크도 포함하고 recentListLimit건까지만 주는지 본다.
 func TestListRecentLimit(t *testing.T) {
-	svc := NewService(NewMemoryRepository(), 7)
+	svc := NewService(NewMemoryRepository(), 7, &fakeClicks{})
 	ctx := context.Background()
 
 	var codes []string

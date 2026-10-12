@@ -3,6 +3,7 @@ package links
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // 도메인 에러. 상위 레이어(서비스/핸들러)는 errors.Is로 분기해 HTTP 상태코드를 정한다.
@@ -32,10 +33,18 @@ type Repository interface {
 	Create(ctx context.Context, code, destURL string) (Link, error)
 	// Get은 코드로 링크를 조회한다. 없으면 ErrNotFound.
 	Get(ctx context.Context, code string) (Link, error)
-	// IncrementClicks는 코드의 클릭 수를 1 늘린다. 없으면 ErrNotFound.
-	IncrementClicks(ctx context.Context, code string) error
 	// SetDisabled는 링크를 중단하거나(true) 다시 켠다(false). 없으면 ErrNotFound.
 	SetDisabled(ctx context.Context, code string, disabled bool) (Link, error)
 	// ListRecent는 링크를 최근 생성순으로 최대 limit건 돌려준다(운영자 화면용).
 	ListRecent(ctx context.Context, limit int) ([]Link, error)
+}
+
+// ClickBatchRepository는 큐에서 온 클릭 배치를 반영한다(plan 0013). 리다이렉트 경로는 쓰지 않고 워커만 쓴다.
+type ClickBatchRepository interface {
+	// ApplyClickBatch는 코드별 클릭 수를 한 트랜잭션으로 더한다.
+	// 같은 batchID를 이미 반영했으면 아무것도 바꾸지 않고 duplicate=true다 — 큐는 최소 한 번 전달이라 같은 배치가 다시 온다.
+	// 없는 코드의 클릭은 건너뛰고 그 합을 unknownClicks로 돌려준다.
+	ApplyClickBatch(ctx context.Context, batchID string, counts map[string]int64) (duplicate bool, unknownClicks int64, err error)
+	// PruneClickBatches는 olderThan보다 오래 전에 반영한 배치 ID를 지우고 지운 수를 돌려준다.
+	PruneClickBatches(ctx context.Context, olderThan time.Duration) (int64, error)
 }

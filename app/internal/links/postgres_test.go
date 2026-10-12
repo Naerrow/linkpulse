@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -51,7 +55,13 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.ExecContext(ctx, requestSchema); err != nil {
 		t.Fatalf("요청 스키마 준비 실패: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `TRUNCATE link_requests, links`); err != nil {
+	const clickBatchSchema = `CREATE TABLE IF NOT EXISTS click_batches (
+		id TEXT PRIMARY KEY,
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`
+	if _, err := db.ExecContext(ctx, clickBatchSchema); err != nil {
+		t.Fatalf("click_batches 스키마 준비 실패: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `TRUNCATE link_requests, links, click_batches`); err != nil {
 		t.Fatalf("TRUNCATE 실패: %v", err)
 	}
 	return db
@@ -100,28 +110,76 @@ func TestPostgresGetNotFound(t *testing.T) {
 	}
 }
 
-// TestPostgresIncrementClicks는 클릭 증가와 없는 코드 처리를 확인한다.
-func TestPostgresIncrementClicks(t *testing.T) {
+// TestPostgresApplyClickBatch는 메모리 구현과 같은 의미(반영·중복 거르기·없는 코드)를 확인한다(plan 0013).
+func TestPostgresApplyClickBatch(t *testing.T) {
+	testApplyClickBatch(t, NewPostgresRepository(newTestDB(t)))
+}
+
+// TestPostgresApplyClickBatchConcurrent는 겹치는 코드를 담은 배치 두 개를 동시에 반영해도 교착이 없고 합계가 맞는지 본다.
+// counts는 map이라 두 트랜잭션의 순회 순서가 매번 다르다. 코드를 50개나 겹쳐 두었으므로,
+// 정렬 없이 UPDATE하면 거의 모든 회차에서 서로 반대 순서로 잠그다 교착(40P01)이 난다.
+func TestPostgresApplyClickBatchConcurrent(t *testing.T) {
 	repo := NewPostgresRepository(newTestDB(t))
 	ctx := context.Background()
 
-	if _, err := repo.Create(ctx, "clk1234", "https://example.com"); err != nil {
-		t.Fatalf("Create 실패: %v", err)
+	const nCodes, rounds = 50, 200
+	counts := make(map[string]int64, nCodes)
+	for i := 0; i < nCodes; i++ {
+		code := fmt.Sprintf("cc%05d", i)
+		if _, err := repo.Create(ctx, code, "https://example.com"); err != nil {
+			t.Fatalf("Create 실패: %v", err)
+		}
+		counts[code] = 1
 	}
-	for i := 0; i < 2; i++ {
-		if err := repo.IncrementClicks(ctx, "clk1234"); err != nil {
-			t.Fatalf("IncrementClicks 실패: %v", err)
+
+	var failed atomic.Int64
+	for r := 0; r < rounds; r++ {
+		var wg sync.WaitGroup
+		for w := 0; w < 2; w++ {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				if _, _, err := repo.ApplyClickBatch(ctx, id, counts); err != nil {
+					if failed.Add(1) <= 3 {
+						t.Errorf("배치 %s 반영 실패: %v", id, err)
+					}
+				}
+			}(fmt.Sprintf("r%03d-w%d", r, w))
+		}
+		wg.Wait()
+	}
+	if n := failed.Load(); n > 0 {
+		t.Fatalf("반영 실패 %d건(교착 의심)", n)
+	}
+	for code := range counts {
+		got, err := repo.Get(ctx, code)
+		if err != nil {
+			t.Fatalf("Get(%s) 실패: %v", code, err)
+		}
+		if got.Clicks != 2*rounds {
+			t.Fatalf("%s Clicks = %d, want %d", code, got.Clicks, 2*rounds)
 		}
 	}
-	got, err := repo.Get(ctx, "clk1234")
-	if err != nil {
-		t.Fatalf("Get 실패: %v", err)
+}
+
+// TestPostgresPruneClickBatches는 보존 기간이 지난 배치 ID만 지워지는지 본다.
+func TestPostgresPruneClickBatches(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewPostgresRepository(db)
+	ctx := context.Background()
+	for _, id := range []string{"b-old", "b-new"} {
+		if _, _, err := repo.ApplyClickBatch(ctx, id, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got.Clicks != 2 {
-		t.Errorf("Clicks = %d, want 2", got.Clicks)
+	if _, err := db.ExecContext(ctx, `UPDATE click_batches SET applied_at = now() - interval '48 hours' WHERE id = 'b-old'`); err != nil {
+		t.Fatal(err)
 	}
-	if err := repo.IncrementClicks(ctx, "missing"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("없는 코드 IncrementClicks err = %v, want ErrNotFound", err)
+	if n, err := repo.PruneClickBatches(ctx, 24*time.Hour); err != nil || n != 1 {
+		t.Fatalf("Prune = %d, %v, want 1", n, err)
+	}
+	if dup, _, _ := repo.ApplyClickBatch(ctx, "b-new", nil); !dup {
+		t.Error("보존 기간 안의 배치가 지워졌다")
 	}
 }
 
