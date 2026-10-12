@@ -61,6 +61,9 @@ resource "aws_ecs_task_definition" "app" {
         #   ARN의 리전과 다르면 앱이 기동 오류로 막는다.
         { name = "DB_SECRET_ARN", value = local.rotation_secret_arn },
         { name = "AWS_REGION", value = var.region },
+        # plan 0013: 클릭 배치 큐. 비밀이 아니다(계정 ID가 든 URL이지만 태스크 정의 안에만 있다).
+        # APP_ENV=production인데 이 값이 없으면 앱이 기동을 거부한다(메모리 큐 폴백 금지).
+        { name = "CLICK_QUEUE_URL", value = aws_sqs_queue.clicks.url },
         ],
         # plan 0011: 관리자 토큰의 SHA-256 해시. 토큰은 외우는 비밀번호라 해시가 새면 대입으로 풀릴 수 있다.
         #   그래서 변수를 sensitive로 둬 plan·apply 출력(공개 PR에 첨부)에 값이 찍히지 않게 한다. 대가로 container_definitions
