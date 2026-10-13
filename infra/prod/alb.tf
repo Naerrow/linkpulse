@@ -22,16 +22,18 @@ resource "aws_lb_target_group" "app" {
   port        = 8080
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
-  target_type = "ip" # Fargate(awsvpc)는 IP 타깃
+  target_type = "ip" # 파드 IP(VPC CNI). LB 컨트롤러가 TargetGroupBinding으로 등록한다(infra/k8s)
 
   # 헬스체크는 liveness(/healthz)만 본다. DB 의존성(/readyz)을 ALB가 보면 DB 일시
   # 장애에 전 태스크가 한꺼번에 unhealthy가 되어 장애가 증폭된다.
+  # 간격 10초·healthy 2회(plan 0014): 파드의 readiness gate가 ALB healthy를 기다리므로, 이 값이 새 파드가
+  # 트래픽을 받기까지의 시간(약 20초)이다. 30초·3회면 60~90초라 HPA로 늘린 파드가 측정 단계 안에 일하지 못한다.
   health_check {
     path                = "/healthz"
     matcher             = "200"
-    interval            = 30
+    interval            = 10
     timeout             = 5
-    healthy_threshold   = 3
+    healthy_threshold   = 2
     unhealthy_threshold = 3
   }
 

@@ -1,0 +1,14 @@
+# LB 컨트롤러가 이 Service의 엔드포인트(Ready 파드 IP)를 기존 타깃 그룹에 등록·해제한다. ALB는 만들지 않는다.
+# networking을 두지 않는다 — 컨트롤러가 보안 그룹 규칙을 바꾸지 않게 한다(SG는 infra/prod Terraform만 바꾼다).
+# vpcID를 적어 컨트롤러가 VPC를 찾으려고 AWS API를 부르지 않게 한다.
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: linkpulse
+spec:
+  serviceRef:
+    name: {{ .Values.targetGroupBinding.serviceName }}
+    port: {{ .Values.targetGroupBinding.servicePort }}
+  targetGroupARN: {{ required "targetGroupBinding.targetGroupARN이 필요하다" .Values.targetGroupBinding.targetGroupARN | quote }}
+  targetType: ip
+  vpcID: {{ required "targetGroupBinding.vpcID가 필요하다" .Values.targetGroupBinding.vpcID | quote }}

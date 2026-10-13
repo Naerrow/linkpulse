@@ -1,0 +1,6 @@
+# AWS(EKS) 사이트에서 기본값과 다른 값만 둔다.
+#
+# 지금은 없다. 연결 예산(풀 11 × 파드 최대 7)은 RDS t4g.micro 기준이라 기본값이 곧 AWS 값이고,
+# 비밀번호 출처(aws)·RDS 주소·큐 URL은 infra/k8s가 넣는 사이트 ConfigMap에 있다.
+# ArgoCD Application이 이 파일을 values.yaml 위에 겹쳐 쓴다. P6에서 values-home.yaml을 더한다.
+{}

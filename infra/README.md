@@ -1,9 +1,11 @@
-# linkpulse 인프라 (P1, Terraform)
+# linkpulse 인프라 (Terraform)
 
-AWS(ap-northeast-2)에 ECS Fargate로 배포한다. **모든 `apply`는 사람이 직접** 수행한다(인프라 변경은 사람이 승인하는 원칙). **Terraform 1.10+** 필요(S3 네이티브 lockfile 사용, DynamoDB 미사용).
+AWS(ap-northeast-2)에 **EKS**로 배포한다(plan 0014 — P1~P4는 ECS Fargate였다. 근거는 [ADR 0007](../docs/adr/0007-ecs-to-eks.md)). **모든 `apply`는 사람이 직접** 수행한다(인프라 변경은 사람이 승인하는 원칙). **Terraform 1.10+** 필요(S3 네이티브 lockfile 사용, DynamoDB 미사용). `aws`·`kubectl` CLI도 필요하다(kubectl은 클러스터 버전 ±1 마이너를 쓴다).
 
 - `bootstrap/` — Terraform state용 S3 버킷 1개만 생성(state는 로컬).
-- `prod/` — VPC·ALB·ECS·RDS·IAM 등 본 인프라(S3 backend).
+- `prod/` — VPC·ALB·RDS·SQS·EKS(클러스터·노드·애드온)·IAM 등 AWS 리소스(S3 backend, 키 `prod/`).
+- `k8s/` — 클러스터 안의 것: LB 컨트롤러·ArgoCD·Image Updater·Fluent Bit·사이트 값(ConfigMap·Secret)·TargetGroupBinding·ArgoCD Application(S3 backend, 키 `k8s/`). helm·kubernetes provider는 클러스터가 있어야 설정되므로 `prod/` 다음에 따로 apply한다.
+- 앱 자체는 Terraform이 아니라 **ArgoCD가 git의 차트(`deploy/helm/linkpulse`)로** 배포한다. 이미지는 CI가 GHCR에 올리고, Image Updater가 `main` 다이제스트를 따라간다.
 
 ## 배포 순서
 
@@ -23,54 +25,49 @@ AWS(ap-northeast-2)에 ECS Fargate로 배포한다. **모든 `apply`는 사람�
    terraform init -backend-config=backend.hcl
    ```
 
-3. **인프라 생성(태스크 0개)** — 이미지가 아직 없으므로 `-var service_desired_count=0`으로 VPC/RDS/ALB/ECR/IAM(CI 배포 role 포함)을 먼저 만든다. (`service_desired_count` 기본값은 운영용 2이므로 최초엔 0을 명시한다.) ACM DNS 검증을 위해 도메인이 Route53에 위임돼 있어야 한다.
+3. **GHCR 패키지 공개(1회, GitHub 화면)** — CI(`deploy.yml`)가 main 머지마다 `ghcr.io/naerrow/linkpulse:{<sha>,main}`(arm64+amd64)을 올린다. 첫 푸시 뒤 GitHub → Packages → linkpulse → Package settings에서 **Public**으로 바꾼다. 그래야 클러스터가 pull 비밀 없이 받는다. CI에는 AWS 권한이 없다(GitHub repo Variables도 필요 없다).
+
+4. **AWS 리소스 + EKS(prod)** — ACM DNS 검증을 위해 도메인이 Route53에 위임돼 있어야 한다. 약 15~20분.
 
    ```bash
-   terraform plan -var service_desired_count=0 && terraform apply -var service_desired_count=0
+   terraform plan && terraform apply
+   aws eks update-kubeconfig --name "$(terraform output -raw eks_cluster_name)" --region ap-northeast-2
    ```
 
-4. **GitHub repo Variables 등록** — 이후 이미지 빌드·배포는 CI가 맡으므로(P2), `terraform output` 값을 GitHub repo Variables에 넣는다.
+5. **클러스터 안(k8s)** — 관리자 토큰 해시는 이 스택의 tfvars에 둔다(`k8s/terraform.tfvars.example`).
 
    ```bash
-   terraform output -raw github_actions_role_arn     # AWS_DEPLOY_ROLE_ARN
-   terraform output -raw ecr_repository_url           # ECR_REPOSITORY_URL
-   terraform output -raw ecr_repository_name          # ECR_REPOSITORY_NAME
-   terraform output -raw ecs_cluster_name             # ECS_CLUSTER_NAME
-   terraform output -raw ecs_service_name             # ECS_SERVICE_NAME
-   terraform output -raw ecs_task_definition_family   # ECS_TASK_DEFINITION_FAMILY
+   cd ../k8s
+   cp terraform.tfvars.example terraform.tfvars   # admin_token_sha256 채움(선택)
+   terraform init -backend-config=../prod/backend.hcl
+   terraform plan && terraform apply
    ```
 
-5. **첫 배포 + 스케일** — `service.task_definition`은 `ignore_changes`라 **Terraform이 아니라 CI가** task definition을 실제 이미지로 갱신한다(`docs/adr/0001`).
+   순서는 Terraform이 지킨다: 컨트롤러(LBC·ArgoCD·Image Updater) → site(ConfigMap·Secret·TGB) → gitops(Application·ImageUpdater). 그 뒤 ArgoCD가 앱을 동기화한다.
 
-   1. CI 배포를 1회 트리거한다(main 푸시 또는 `workflow_dispatch`). CI가 이미지를 빌드→ECR push→task definition을 실제 이미지(git sha)로 갱신한다. 이 시점 `desired_count`는 0이라 태스크는 아직 뜨지 않는다.
-   2. 이어서 `terraform apply`(기본 `desired_count=2`)로 태스크 2개로 스케일한다. `task_definition`은 ignore되어 CI가 설정한 실제 이미지가 유지된다.
+6. **확인** — `kubectl -n linkpulse rollout status deploy/linkpulse`, `https://lpulse.live/healthz` 200, 단축/리다이렉트 동작, CloudWatch 로그(`/eks/linkpulse-prod/app`) 수신.
 
-   ```bash
-   # (1) CI 배포(Actions)가 성공한 뒤:
-   terraform apply
-   ```
-
-6. **확인** — `https://lpulse.live/healthz` 200, 단축/리다이렉트 동작, CloudWatch 로그 수신.
+4~6을 한 번에 하는 것이 `scripts/full-apply-prod.sh`다(아래).
 
 ## 개발 비용 절감: prod 전체 내렸다가 다시 올리기
 
-실사용자가 없고 개발 데이터·로그·이미지를 버려도 되는 기간에는 `infra/prod` 스택을 통째로 지워 비용을 거의 0에 가깝게 낮춘다. 이 방식은 **운영 데이터 보존용이 아니다.** RDS 최종 스냅샷을 남기지 않고, CloudWatch Logs와 ECR 이미지도 삭제한다.
+실사용자가 없고 개발 데이터·로그를 버려도 되는 기간에는 `infra/k8s`·`infra/prod` 스택을 통째로 지워 비용을 거의 0에 가깝게 낮춘다(EKS 컨트롤 플레인·노드·NAT는 켜져 있는 동안 시간 과금). 이 방식은 **운영 데이터 보존용이 아니다.** RDS 최종 스냅샷을 남기지 않고, CloudWatch Logs도 삭제한다.
 
 남기는 것:
 
 - `infra/bootstrap` state 버킷 — 별도 Terraform 스택이므로 건드리지 않는다.
 - 도메인 등록과 기존 Route53 hosted zone — `prod`는 hosted zone을 생성하지 않고 조회만 한다.
-- GitHub repo Variables — GitHub 쪽 설정이므로 Terraform destroy 대상이 아니다.
+- GHCR 이미지 — AWS가 아니다. 그래서 다시 켤 때 "이미지 부트스트랩 → CI 배포 대기" 단계가 없다.
 
 삭제하는 것:
 
-- ECS, ALB, NAT Gateway/EIP, VPC/Subnet/Route table/Security group
+- 클러스터 안의 것(`infra/k8s`): Helm 릴리스(LBC·ArgoCD·Image Updater·Fluent Bit·site·gitops), 네임스페이스
+- EKS 클러스터·노드 그룹·애드온·Pod Identity 연결, ALB, NAT Gateway/EIP, VPC/Subnet/Route table/Security group
 - RDS PostgreSQL 인스턴스와 자동 관리 Secrets Manager 시크릿
-- CloudWatch Logs/Alarms, SNS, Chatbot Slack 설정
-- ECR repository와 이미지
-- prod 스택이 만든 IAM role/policy, GitHub OIDC provider, ACM 인증서, Route53 record
+- SQS 클릭 큐·DLQ, CloudWatch Logs/Alarms, SNS, Chatbot Slack 설정
+- prod 스택이 만든 IAM role/policy, ACM 인증서, Route53 record
 
-다른 프로젝트도 같은 AWS 계정의 GitHub OIDC provider를 공유한다면, full destroy 전에 `existing_github_oidc_provider_arn` 방식으로 소유권을 분리해야 한다. 지금 프로젝트만 쓰는 개발 계정이면 그대로 지워도 된다.
+plan 0014 전 계정에 남아 있을 수 있는 GitHub OIDC provider는 이제 어느 스택도 관리하지 않는다. 다른 프로젝트가 쓰지 않으면 IAM 콘솔에서 지운다.
 
 ### 끄기: full destroy
 
@@ -78,7 +75,13 @@ AWS(ap-northeast-2)에 ECS Fargate로 배포한다. **모든 `apply`는 사람�
 ./scripts/full-destroy-prod.sh --drop-dev-db
 ```
 
-스크립트는 먼저 `terraform plan`으로 RDS 삭제 보호 해제와 ECR force delete 설정만 보여준 뒤, 확인 문구를 요구한다. 이후 다시 `terraform plan -destroy`를 보여주고, `destroy linkpulse prod`를 직접 입력해야 실제 삭제를 진행한다.
+스크립트 순서(finalizer 때문에 순서가 중요하다 — ADR 0007):
+
+1. 클러스터가 있으면 ArgoCD Application과 TargetGroupBinding을 **각 컨트롤러가 살아 있을 때** `kubectl delete --wait`로 먼저 지우고, 남은 것이 없는지 확인한다. 이때부터 앱이 내려간다.
+2. `infra/k8s` `terraform plan -destroy` → `destroy linkpulse k8s` 입력.
+3. `infra/prod` RDS 삭제 보호 해제 plan → `prepare destroy` 입력 → `terraform plan -destroy` → `destroy linkpulse prod` 입력.
+
+finalizer에 걸려 멈추면 [alarm-response.md](../docs/runbooks/alarm-response.md) "EKS 운영"을 본다.
 
 계획만 보고 멈추려면:
 
@@ -94,50 +97,42 @@ AWS(ap-northeast-2)에 ECS Fargate로 배포한다. **모든 `apply`는 사람�
 
 재생성 순서:
 
-1. `service_desired_count=0`, `image_tag=bootstrap`으로 인프라를 먼저 만든다.
-2. GitHub Actions `deploy` workflow를 `main` 브랜치로 실행해 실제 이미지를 ECR에 push하고 ECS service의 task definition을 갱신한다.
-3. workflow 성공 후 스크립트에서 Enter를 눌러 정상 desired count로 스케일한다.
-4. 스크립트가 `https://lpulse.live/healthz`를 확인한다.
+0. GHCR `main` 이미지가 있고 공개인지 확인한다(없으면 Actions `deploy`를 main에서 돌리고 패키지를 공개로).
+1. `infra/prod` plan → `apply linkpulse prod` 입력(약 15~20분).
+2. kubeconfig를 받는다.
+3. `infra/k8s` plan → `apply linkpulse k8s` 입력.
+4. ArgoCD가 `deploy/linkpulse`를 만들고 롤아웃이 끝날 때까지 기다린다(Ready = ALB 타깃 healthy, readiness gate).
+5. `https://lpulse.live/healthz`를 확인한다.
 
-GitHub CLI가 로그인되어 있으면 workflow 트리거까지 같이 할 수 있다.
-
-```bash
-./scripts/full-apply-prod.sh --trigger-deploy
-```
-
-인프라만 만들고 수동으로 배포·스케일하려면:
-
-```bash
-./scripts/full-apply-prod.sh --no-scale
-```
+`--trigger-deploy`는 이제 필요 없다(이미지는 GHCR에 남아 있다). 넘겨도 무시한다.
 
 주의:
 
 - `terraform apply` 자체에는 비용이 붙지 않는다. 비용은 생성된 AWS 리소스가 존재하는 시간부터 발생한다.
 - RDS 데이터가 필요한 시점이 오면 이 절차를 쓰면 안 된다. 그때는 최종 스냅샷/복원 절차를 별도 runbook으로 분리한다.
-- `infra/prod` 전체를 반복 삭제하는 개발 운용 방식이므로, `terraform.tfvars`에 비밀값을 넣지 않는다.
+- 반복 삭제하는 개발 운용 방식이므로 `terraform.tfvars`에 비밀값을 넣지 않는다. 예외는 관리자 토큰 **해시**(`infra/k8s/terraform.tfvars`, 원문 아님)다.
+- 측정 때 레이트리밋 예외 IP는 `infra/k8s` apply의 `-var rate_limit_exempt_ips=...`로 넣고 `kubectl -n linkpulse rollout restart deploy/linkpulse`(envFrom은 Secret 변경을 다시 읽지 않는다).
 
 ## 운영 안전 주의
 
 - **state 버킷을 destroy하지 말 것.** `prevent_destroy=true`로 잠겨 있다. bootstrap state는 로컬이라 분실 시 `terraform import`로 복구한다.
 - **RDS 철거**는 `deletion_protection=true`·`skip_final_snapshot=false`로 이중 보호된다. 정말 지우려면 두 변수를 풀어야 하며, 최종 스냅샷 이름(`linkpulse-prod-pg-final`)이 이미 있으면 충돌하므로 정리 후 진행한다.
-- **비밀번호**는 RDS가 Secrets Manager에 생성·관리하고, ECS가 `DB_PASSWORD`로만 주입한다. 코드·state·tfvars에 평문으로 두지 않는다.
+- **비밀번호**는 RDS가 Secrets Manager에 생성·관리하고, 앱이 기동 때와 인증 실패 때 Secrets Manager에서 직접 읽는다(`DB_PASSWORD_SOURCE=aws`, 권한은 Pod Identity 파드 역할). 코드·state·tfvars·쿠버네티스 Secret에 평문으로 두지 않는다.
 - `terraform plan` 출력은 PR/기록에 보관한다.
 
-## P2 CI/CD 경계 (요약 — 자세히는 `docs/adr/0001-cicd-terraform-ci-boundary.md`)
+## CI/CD 경계 (plan 0014 — 자세히는 [ADR 0007](../docs/adr/0007-ecs-to-eks.md). ECS 시절 경계는 ADR 0001)
 
-- 인프라는 Terraform(사람 `apply`), 앱 이미지 배포는 GitHub Actions(OIDC)가 `register-task-definition`+`update-service`로 수행한다. **CI는 `terraform apply`를 실행하지 않는다.**
-- `aws_ecs_service.app`는 `ignore_changes=[task_definition]`이라, **Terraform으로 task definition을 바꾸면 다음 CI 배포(main 푸시/`workflow_dispatch`)가 1회 돌아야 라이브에 반영된다.**
-- 운영 가동값은 `service_desired_count=2`. **최초 부트스트랩(이미지 없음) 때만 `-var service_desired_count=0`** 으로 인프라를 먼저 만든다.
-- **apply 전**: 로컬 `terraform.tfvars`가 prod를 0/잘못된 태그로 떨구지 않는지 확인하고, `image_tag`를 현재 라이브 태그(`aws ecs describe-services`→`describe-task-definition`)에 맞춘다. OIDC 공급자가 계정에 이미 있으면 `existing_github_oidc_provider_arn`을 지정한다.
-- 배포 후 `terraform output`의 `github_actions_role_arn`/`ecr_repository_url`/`ecr_repository_name`/`ecs_cluster_name`/`ecs_service_name`/`ecs_task_definition_family`를 GitHub repo Variables에 등록한다.
+- 인프라는 Terraform(사람 `apply`). CI(GitHub Actions)는 테스트 → 이미지 빌드 → **GHCR 푸시만** 한다. CI에는 AWS·클러스터 권한이 없다(OIDC 배포 역할을 지웠다).
+- 배포는 클러스터 안에서 일어난다: Image Updater가 GHCR `main` 다이제스트 변경을 보고 ArgoCD Application의 `image.tag` 파라미터를 바꾸고(git에 쓰지 않는다), ArgoCD가 롤링 배포한다.
+- 그래서 **인프라가 꺼져 있어도 main 머지 후 CI는 성공한다.** 켜면 그때의 `main` 이미지로 뜬다.
+- 롤백은 Image Updater를 멈추고 이미지를 고정한다(runbook R-1).
 
 ## 모니터링 및 알림 (P3 — 자세히는 `docs/adr/0002-alerting-design.md`)
 
 장애를 자동 감지해 Slack으로 통지한다. 경로: **CloudWatch Alarm → SNS(`linkpulse-prod-alarms`) → AWS Chatbot(Amazon Q Developer in chat applications) → Slack**. 알람 정의는 `monitoring.tf`, Slack 배선은 `chatbot.tf`.
 
-- **알람 12개(초기값):** ALB(target 5xx·ELB 5xx·unhealthy host·p95 지연·**healthy host 0=다운**), ECS(CPU·Memory·RunningTaskCount<desired), RDS(CPU·여유 스토리지·여유 메모리·연결 수). 임계값은 실트래픽 보며 조정한다.
-- **Container Insights**는 `enable_container_insights=true`(default)로 켠다. RunningTaskCount 등 태스크 레벨 메트릭이 나온다(활성 직후 수 분은 INSUFFICIENT_DATA가 정상).
+- **알람(초기값):** ALB 5개(target 5xx·ELB 5xx·unhealthy host·p95 지연·**healthy host 0=다운**), RDS 4개(CPU·여유 스토리지·여유 메모리·연결 수), 클릭 큐 2개(`sqs.tf`), 시크릿 이벤트 관찰 1개(`secret-events.tf`). 임계값은 실트래픽 보며 조정한다.
+- ECS 알람 3개(CPU·Memory·RunningTaskCount)는 plan 0014에서 지웠다. 파드 CPU·파드 수 알람은 0015(Prometheus)에서 둔다. Container Insights는 켜지 않는다.
 
 ### Slack 연동 절차 (콘솔 OAuth는 사람이 1회)
 
@@ -151,20 +146,17 @@ GitHub CLI가 로그인되어 있으면 workflow 트리거까지 같이 할 수 
 
 **통지가 안 오면:** ① 채널에 `@Amazon Q` 앱이 초대됐는지 ② **실제 구독 존재** 확인 — `slack_alerts_enabled=true`는 team/channel 변수가 설정됐다는 Terraform 계산값일 뿐이므로, `aws sns list-subscriptions-by-topic --topic-arn "$(terraform output -raw sns_alarms_topic_arn)"`(또는 SNS 콘솔)로 구독이 실제로 걸렸는지 본다 ③ 그 구독에 **raw message delivery가 켜져 있지 않은지**(꺼야 한다)를 본다. ④ **canary 알람(무트래픽 방어선, 아래)은 us-east-1 전용 토픽**이라 별도 확인 — `aws sns list-subscriptions-by-topic --topic-arn "$(terraform output -raw sns_canary_topic_arn)" --region us-east-1`. 이 토픽 구독이 없으면 canary 다운 카드만 조용히 누락된다(12개 알람은 정상인데 canary만 침묵).
 
-### 배포 실패 알림 (P4 — 자세히는 `docs/adr/0003-deploy-failure-alerts.md`)
+### 배포 실패 알림 (plan 0014에서 지움)
 
-ECS 롤링 배포가 실패해 서킷브레이커가 롤백하면 Slack으로 자동 통지한다. 경로: **EventBridge(`ECS Deployment State Change`/`SERVICE_DEPLOYMENT_FAILED`) → SNS(`linkpulse-prod-alarms`, 재사용) → Chatbot → Slack**. 규칙·타깃·실행 role은 `eventbridge.tf`.
-
-- **커버리지 갭:** 이 경로는 **ECS단 배포 실패만** 잡는다. GitHub Actions단 실패(빌드/테스트 실패, **러너 미획득/플랫폼 장애**)는 ECS까지 도달하지 않아 못 잡는다 — `job not acquired`는 githubstatus.com부터 본다(`docs/postmortems/2026-07-09-deploy-runner-acquisition.md`).
-- **필터 사전 검증(apply 전):** `docs/plans/0005-p4-deploy-failure-alerts/fixtures`의 `aws events test-event-pattern`으로 event_pattern이 실패 이벤트를 잡는지 확인한다(`{ "Result": true }` 기대).
-- **종단 검증(apply 후):** `slack_alerts_enabled=true` 확인 → 의도적 나쁜 이미지 배포로 서킷브레이커 롤백 유발 → **Slack 배포 실패 카드 수신**(서비스 ARN·이벤트명·`reason` 정상 렌더) → 서킷브레이커가 직전 정상 taskdef로 자동 롤백하므로 재배포 없이 복구(원복 확인만). 나쁜 이미지·주입 절차는 기존 GameDay 자료 재사용: `load/chaos/README.md`(chaos 이미지, `/healthz` 404), `docs/postmortems/2026-07-06-gameday-01.md`(known-good taskdef 기준선·진행 중 run 부재·healthz 폴링 preflight).
-- **`reason` escaping 잔여 리스크(수용):** `reason`에 개행이 들어가면 카드가 조용히 드롭될 수 있으나, ECS 통제 단일 줄 문자열이라 수용한다(근거·검증법은 ADR 0003).
+ECS 배포 실패 → EventBridge → Slack 경로(ADR 0003, `eventbridge.tf`)는 ECS와 함께 지웠다. ArgoCD 동기화 실패 알림은 0015에서 둔다.
+그 사이 배포 실패는 사용자에게 번지지 않는다 — 새 파드가 ALB에서 healthy가 되지 않으면 롤링이 멈추고 옛 파드가 남는다(readiness gate, surge 1·unavailable 0).
+확인은 `kubectl -n argocd get application linkpulse`와 `kubectl -n linkpulse rollout status deploy/linkpulse`.
 
 ### 무트래픽 방어선 canary (P4 — 자세히는 `docs/adr/0004-notraffic-canary.md`)
 
 실사용 트래픽이 0인 시간대(새벽 등)의 다운을 잡는 **무트래픽 방어선**이다(회고 A-5·A-10). Route53 헬스체크가 `lpulse.live/readyz`를 외부에서 상시(30초) 프로빙해, (a) 무트래픽 다운이어도 ALB가 503을 뱉어 `alb-elb-5xx`가 발화하게 하고, (b) `HealthCheckStatus`(1=정상/0=다운) 지표로 트래픽과 무관한 직접 신호를 준다. 리소스는 `synthetic-canary.tf`, us-east-1 provider 별칭은 `providers.tf`.
 
-- **무엇을 프로빙하나 (P4(d)-2에서 `/healthz` → `/readyz`로 변경):** 이 프로젝트의 두 엔드포인트는 역할이 다르다. `/healthz`는 **liveness** — 프로세스가 살아 요청을 처리하는지만 보고 **DB를 조회하지 않는다.** `/readyz`는 **readiness** — DB 핑까지 하고 실패하면 503이다. 2026-08-16 RDS 비밀번호 로테이션 장애 때 canary와 ALB 타깃그룹이 **둘 다 `/healthz`** 를 보고 있어, 앱이 DB 신규 연결에 전면 실패하는 66시간 내내 양쪽 모두 200을 받고 침묵했다. canary를 `/readyz`로 옮겨 이 공백을 닫았다. **liveness 백스톱은 잃지 않는다** — 프로세스가 죽으면 `/readyz`도 응답하지 못하므로 `/readyz`는 `/healthz`의 상위집합이다. **이 변경은 canary에만 적용했고 ALB 타깃그룹 헬스체크는 `/healthz` 그대로다**(`alb.tf`) — 타깃그룹까지 바꾸면 DB 장애 시 두 타깃이 모두 unhealthy가 돼 ECS 태스크 교체가 도는 별개의 트레이드오프가 생기므로 이 plan의 범위에서 제외했다. 그 결과 **DB 장애에서는 타깃이 healthy를 유지해 `alb-elb-5xx`가 울리지 않고 `alb-target-5xx`가 1순위**가 된다(runbook §13).
+- **무엇을 프로빙하나 (P4(d)-2에서 `/healthz` → `/readyz`로 변경):** 이 프로젝트의 두 엔드포인트는 역할이 다르다. `/healthz`는 **liveness** — 프로세스가 살아 요청을 처리하는지만 보고 **DB를 조회하지 않는다.** `/readyz`는 **readiness** — DB 핑까지 하고 실패하면 503이다. 2026-08-16 RDS 비밀번호 로테이션 장애 때 canary와 ALB 타깃그룹이 **둘 다 `/healthz`** 를 보고 있어, 앱이 DB 신규 연결에 전면 실패하는 66시간 내내 양쪽 모두 200을 받고 침묵했다. canary를 `/readyz`로 옮겨 이 공백을 닫았다. **liveness 백스톱은 잃지 않는다** — 프로세스가 죽으면 `/readyz`도 응답하지 못하므로 `/readyz`는 `/healthz`의 상위집합이다. **이 변경은 canary에만 적용했고 ALB 타깃그룹 헬스체크는 `/healthz` 그대로다**(`alb.tf`) — 타깃그룹까지 바꾸면 DB 장애 시 두 타깃이 모두 unhealthy가 돼 ECS 태스크 교체가 도는 별개의 트레이드오프가 생기므로 이 plan의 범위에서 제외했다. **EKS(plan 0014)에서도 같은 이유로 파드 readiness를 `/healthz`로 뒀다** — TargetGroupBinding은 NotReady 파드를 타깃에서 빼므로 `/readyz`면 DB 장애 때 파드가 전부 빠진다(ADR 0007). 그 결과 **DB 장애에서는 타깃이 healthy를 유지해 `alb-elb-5xx`가 울리지 않고 `alb-target-5xx`가 1순위**가 된다(runbook §13).
 - **응답 시간 제약:** Route53은 **연결 후 2초 안에**(= TLS 핸드셰이크 포함) 2xx/3xx를 받아야 healthy로 본다. `/readyz`의 DB 핑 상한도 2초면 앱이 503을 확정하는 순간과 Route53이 포기하는 순간이 겹쳐 503이 전달되지 않고 로그에도 실제 DB 에러 대신 취소·deadline 계열 오류(`context canceled` 등)가 남을 수 있으므로 **1초**로 낮췄다(`app/internal/httpapi/health.go` `readinessTimeout`). **오탐 방지가 아니라 판정 일치가 목적이다** — 정상 DB 핑은 수 ms라 상한 1초/2초의 결과가 같다. 같은 이유로 앱 배포가 canary 경로 변경보다 **먼저** 나가야 한다.
 
 - **크로스리전:** Route53 헬스체크 지표는 **us-east-1에만 발행**되므로 `canary_down` 알람·전용 SNS 토픽도 us-east-1에 둔다. 이 토픽을 기존 Chatbot config에 크로스리전으로 **추가** 바인딩해 같은 Slack 채널로 통지한다(ADR 0002 패턴). 그래서 canary 관련 CLI 조회는 전부 `--region us-east-1`.
@@ -192,9 +184,10 @@ aws cloudwatch set-alarm-state --alarm-name linkpulse-prod-canary-down --region 
   --state-value OK --state-reason "reset"
 ```
 
-### CloudWatch Logs Insights 조회 (로그 그룹 `/ecs/linkpulse-prod-app`)
+### CloudWatch Logs Insights 조회 (로그 그룹 `/eks/linkpulse-prod/app`)
 
-앱은 JSON 구조화 로그(`method`/`path`/`status`/`duration_ms`)를 낸다.
+앱은 JSON 구조화 로그(`method`/`path`/`status`/`duration_ms`)를 낸다. Fluent Bit가 앱 JSON을 최상위 필드로 풀고(`Merge_Log`) `kubernetes.pod_name` 등을 더해 보낸다. `task_id`는 파드 이름이다.
+ECS 시절 그룹(`/ecs/linkpulse-prod-app`)은 destroy와 함께 사라졌다.
 
 ```
 # 에러(5xx)만

@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "linkpulse.fullname" . }}
+  labels:
+    {{- include "linkpulse.labels" . | nindent 4 }}
+spec:
+  {{- /* HPA가 켜져 있으면 replicas를 렌더하지 않는다. 렌더하면 ArgoCD selfHeal이 HPA가 늘린 값을 drift로 보고 되돌린다. */}}
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "linkpulse.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # 한 번에 하나만 더 띄우고, 새 파드가 ALB에서 healthy가 된 뒤에 옛 파드를 뺀다.
+      # surge 1은 DB 연결 예산(values.yaml dbMaxOpenConns)에 들어 있다.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "linkpulse.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      # 앱은 쿠버네티스 API를 부르지 않는다. Pod Identity는 자기 projected 토큰 볼륨을 따로 넣으므로 영향이 없다.
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        # distroless nonroot의 UID·GID. 이미지의 USER가 이름(nonroot)이라 숫자를 적지 않으면 kubelet이 root가 아님을
+        # 확인하지 못해 컨테이너를 만들지 않는다(CreateContainerConfigError).
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: {{ include "linkpulse.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # 사이트 값(DB 주소·비밀번호 출처·큐 URL·관리자 해시 등). 아래 env가 같은 키를 덮어쓴다.
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.site.configMapName }}
+            - secretRef:
+                name: {{ .Values.site.secretName }}
+          env:
+            - name: APP_PORT
+              value: "8080"
+            - name: APP_ENV
+              value: production
+            # 연결 예산은 HPA 범위와 묶여 있어 사이트가 아니라 차트가 정한다.
+            - name: DB_MAX_OPEN_CONNS
+              value: {{ .Values.dbMaxOpenConns | quote }}
+            # 로그의 task_id. collect-metrics가 count_distinct(task_id)로 분마다 파드 수를 센다.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # 서버는 DB 핑·스키마 적용이 끝난 뒤에야 리슨한다. 그래서 /healthz 200 = 초기화 끝이다.
+          # 기동은 최악 약 2분(비밀번호 조회 58초 + DB 핑 재시도 60초)이라 startupProbe가 150초를 준다.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          # readiness는 /readyz(DB 핑)가 아니라 /healthz다(ADR 0007).
+          # TargetGroupBinding은 NotReady 파드를 타깃 그룹에서 뺀다. /readyz면 회전 503 구간에 모든 파드가 빠지고,
+          # DB는 모든 파드가 같이 써서 빼도 갈 곳이 없다. /readyz는 canary 전용이다.
+          # 타임아웃은 ALB 헬스체크와 같은 5초다. 포화 구간에 응답이 잠깐 느려졌다고 파드를 빼면 남은 파드로 부하가 몰린다.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # liveness는 더 느슨하다(약 1분). 이 앱의 liveness는 교착을 잡을 일이 없고, 과부하 때 재시작하면 나빠지기만 한다.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          lifecycle:
+            preStop:
+              # kubelet이 기다린다(이미지가 distroless라 셸·sleep이 없어 exec 훅은 쓸 수 없다).
+              # 그동안 LB 컨트롤러가 타깃을 등록 해제하고 ALB가 새 요청을 보내지 않게 된다.
+              sleep:
+                seconds: {{ .Values.preStopSleepSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- if .Values.dbPasswordSecret.name }}
+          volumeMounts:
+            - name: db-password
+              mountPath: {{ .Values.dbPasswordSecret.mountPath }}
+              readOnly: true
+          {{- end }}
+      {{- if .Values.dbPasswordSecret.name }}
+      volumes:
+        - name: db-password
+          secret:
+            secretName: {{ .Values.dbPasswordSecret.name }}
+      {{- end }}

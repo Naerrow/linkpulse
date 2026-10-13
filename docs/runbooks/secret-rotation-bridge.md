@@ -1,5 +1,11 @@
 # Runbook — RDS 비밀번호 로테이션 마감 브릿지 (사람 수동)
 
+> 🔁 **plan 0014(2026-10)부터 앱은 EKS에서 돈다 — 이 런북의 ECS 명령은 바꿔 읽는다.**
+> 강제 재기동(`aws ecs update-service --force-new-deployment`)은 **`kubectl -n linkpulse rollout restart deploy/linkpulse`** 다.
+> 새 파드는 기동 때 Secrets Manager에서 현재 비밀번호를 직접 읽는다(ECS의 시크릿 주입 대신). Step 1 자동 재배포 Lambda는 지웠으므로
+> 그 판정 절((b-1)·(b-2)·계층 1/2)은 해당 없다. 회전 직후의 기본 판정은 [alarm-response.md](alarm-response.md) §13 "비밀번호 로테이션 직후라면"이 기준이다.
+
+
 RDS 마스터 비밀번호가 자동 로테이션되면 **로테이션 직후에 사람이 ECS 태스크를 강제 재기동해** 새 비밀번호를
 주입하는 임시 절차다. 앱이 `DB_PASSWORD`를 **컨테이너 기동 시 1회만** 주입받는 구조(`infra/prod/ecs.tf`의 `secrets`)라,
 로테이션 후 커넥션 풀이 만료되면 신규 연결이 전부 인증 실패하기 때문이다.

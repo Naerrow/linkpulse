@@ -1,6 +1,6 @@
 # ADR 0001 — Terraform과 CI의 배포 경계
 
-- 상태: 채택 (2026-06-30)
+- 상태: 채택 (2026-06-30). **plan 0014에서 대체 — CI는 GHCR 푸시만, 배포는 ArgoCD([ADR 0007](0007-ecs-to-eks.md)).** 아래는 ECS 시절 기록이다.
 - 관련: AGENTS.md 가드레일 #1(인프라 변경은 사람 승인), Phase P2(CI/CD)
 
 ## 맥락

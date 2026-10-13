@@ -4,36 +4,16 @@
 domain_name = "lpulse.live"
 # hosted_zone_id = "Z0123456789ABCDEFGHIJ"  # 동일 이름 zone이 여러 개일 때만 지정
 
-# 운영 중 안전 기본값: 태스크 2개(무인자 apply가 prod를 0으로 떨구지 않게).
-# 단 최초 부트스트랩(이미지가 ECR에 없음)에는 그대로 apply하지 말고 -var service_desired_count=0으로
-# 인프라를 먼저 만든다(README "배포 순서" 참고).
-service_desired_count = 2
-# 부트스트랩 placeholder. 가동 후 운영 이미지는 CI(P2)가 git sha로 배포하므로,
-# 수동 apply 시에는 현재 라이브 태그(예: v1)로 맞춘다.
-image_tag = "bootstrap"
-
-# 관리자 토큰의 SHA-256 해시(plan 0011). 원문은 여기에도 어디에도 두지 않는다 — 사람만 보관한다.
-#   토큰은 외울 수 있는 8자 이상의 비밀번호(영문·숫자·기호, 단어 사이는 -). 한글은 브라우저가 헤더에 못 싣는다.
-#   read -rs "TOKEN?토큰: "; echo; printf %s "$TOKEN" | shasum -a 256 | cut -d" " -f1; unset TOKEN
-# admin_token_sha256 = "<위 명령의 출력 64자>"
+# 앱 설정(관리자 토큰 해시·레이트리밋 예외·LOG_LEVEL 등)은 이 스택이 아니라 infra/k8s가 클러스터 안에 넣는다
+# (plan 0014). 관리자 토큰 해시는 infra/k8s/terraform.tfvars에 둔다(infra/k8s/terraform.tfvars.example).
 
 # 비용/사양 조정 예시(기본값으로도 동작).
-# db_instance_class = "db.t4g.micro"
-# task_cpu          = "256"
-# task_memory       = "512"
-#
-# 개발 비용 절감을 위해 prod 스택을 완전히 지울 때만 true로 넘긴다.
-# 평상시 terraform.tfvars에는 넣지 않는다. scripts/full-destroy-prod.sh가 명시적으로 true를 전달한다.
-# ecr_force_delete = true
-
-# GitHub OIDC 공급자가 계정에 이미 있으면(다른 프로젝트 등) 그 ARN을 지정한다(없으면 비워둠 → 새로 생성).
-# apply 전 `aws iam list-open-id-connect-providers`로 확인.
-# existing_github_oidc_provider_arn = "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+# db_instance_class  = "db.t4g.micro"
+# eks_version        = "1.37"        # apply 전 aws eks describe-cluster-versions로 표준 지원인지 확인
+# node_instance_type = "t4g.medium"
+# node_count         = 2
 
 # ---- 모니터링 / Slack 알림 (P3) ----
-# Container Insights는 default true(P3). 끄려면 아래 주석을 해제한다(비용 소폭↓, 태스크 레벨 메트릭 상실).
-# enable_container_insights = false
-#
 # Slack 통지: AWS 콘솔 "Amazon Q Developer in chat applications"에서 workspace를 OAuth 승인한 뒤
 # team/channel ID를 넣는다(둘 다 필수 — 한쪽만 넣으면 apply 전 validation 에러). 채널 ID는 채널명이 아니라
 # 우클릭→링크 복사 끝의 문자열(예: C0123ABCDEF). 승인 후 Slack 채널에서 `/invite @Amazon Q` 실행 필요.

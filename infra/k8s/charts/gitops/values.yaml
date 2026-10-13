@@ -1,0 +1,12 @@
+# infra/k8s/main.tf가 채운다.
+repoURL: https://github.com/Naerrow/linkpulse.git
+targetRevision: main
+appNamespace: linkpulse
+
+# 앱 차트 위치와 AWS 사이트 값 파일.
+chartPath: deploy/helm/linkpulse
+valueFiles:
+  - values-aws.yaml
+
+# Image Updater가 다이제스트를 지켜보는 이미지·태그. CI(.github/workflows/deploy.yml)가 머지마다 이 태그를 민다.
+image: ghcr.io/naerrow/linkpulse:main

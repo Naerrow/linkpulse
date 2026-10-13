@@ -13,7 +13,7 @@ func TestResolveDatabaseURL_PrefersDatabaseURL(t *testing.T) {
 	t.Setenv("DATABASE_URL", want)
 	t.Setenv("DB_HOST", "ignored") // 우선순위 확인용 — 무시되어야 한다
 
-	got, _, err := resolveDatabaseURL()
+	got, err := resolveDatabaseURL("")
 	if err != nil {
 		t.Fatalf("예상치 못한 에러: %v", err)
 	}
@@ -32,10 +32,7 @@ func TestResolveDatabaseURL_AssemblesFromParts(t *testing.T) {
 	t.Setenv("DB_PORT", "")    // 미설정 → 기본 5432
 	t.Setenv("DB_SSLMODE", "") // 미설정 → 기본 require
 
-	got, seed, err := resolveDatabaseURL()
-	if seed != "p@ss/w0rd " {
-		t.Errorf("seed 비밀번호 %q — provider seed로 그대로 나와야 한다", seed)
-	}
+	got, err := resolveDatabaseURL("")
 	if err != nil {
 		t.Fatalf("예상치 못한 에러: %v", err)
 	}
@@ -70,7 +67,7 @@ func TestResolveDatabaseURL_EmptyWhenUnset(t *testing.T) {
 	t.Setenv("DB_PASSWORD", "")
 	t.Setenv("DB_NAME", "")
 
-	got, _, err := resolveDatabaseURL()
+	got, err := resolveDatabaseURL("")
 	if err != nil {
 		t.Fatalf("예상치 못한 에러: %v", err)
 	}
@@ -87,7 +84,7 @@ func TestResolveDatabaseURL_PartialIsError(t *testing.T) {
 	t.Setenv("DB_PASSWORD", "")
 	t.Setenv("DB_NAME", "")
 
-	if _, _, err := resolveDatabaseURL(); err == nil {
+	if _, err := resolveDatabaseURL(""); err == nil {
 		t.Fatal("DB_HOST만 있고 나머지가 비면 에러여야 한다")
 	}
 }
@@ -100,7 +97,7 @@ func TestResolveDatabaseURL_PasswordOnlyIsError(t *testing.T) {
 	t.Setenv("DB_PASSWORD", "secret")
 	t.Setenv("DB_NAME", "")
 
-	_, _, err := resolveDatabaseURL()
+	_, err := resolveDatabaseURL("")
 	if err == nil {
 		t.Fatal("DB_PASSWORD만 설정되고 나머지가 비면 에러여야 한다")
 	}
@@ -109,12 +106,54 @@ func TestResolveDatabaseURL_PasswordOnlyIsError(t *testing.T) {
 	}
 }
 
+// 비밀번호 출처가 있으면 DSN에 비밀번호를 넣지 않고, DB_PASSWORD 없이도 조립된다(plan 0014).
+// 출처와 DB_PASSWORD를 함께 두면 무엇이 쓰이는지 모호하므로 막는다.
+func TestResolveDatabaseURL_WithPasswordSource(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("DB_HOST", "db.example.com")
+	t.Setenv("DB_USER", "linkpulse")
+	t.Setenv("DB_PASSWORD", "")
+	t.Setenv("DB_NAME", "linkpulse")
+	t.Setenv("DB_PORT", "")
+	t.Setenv("DB_SSLMODE", "")
+
+	got, err := resolveDatabaseURL(PasswordSourceAWS)
+	if err != nil {
+		t.Fatalf("출처가 있으면 DB_PASSWORD 없이 조립돼야 한다: %v", err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("조립된 DSN 파싱 실패: %v", err)
+	}
+	if _, has := u.User.Password(); has {
+		t.Error("출처가 있으면 DSN에 비밀번호가 없어야 한다")
+	}
+	if u.User.Username() != "linkpulse" {
+		t.Errorf("사용자 %q", u.User.Username())
+	}
+
+	t.Setenv("DB_PASSWORD", "pw")
+	if _, err := resolveDatabaseURL(PasswordSourceFile); err == nil || !strings.Contains(err.Error(), "DB_PASSWORD") {
+		t.Errorf("출처와 DB_PASSWORD를 함께 두면 오류여야 한다: %v", err)
+	}
+
+	// 출처만 있고 접속 키가 없으면 인메모리로 떨어지지 않고 누락을 알린다.
+	t.Setenv("DB_PASSWORD", "")
+	t.Setenv("DB_HOST", "")
+	t.Setenv("DB_USER", "")
+	t.Setenv("DB_NAME", "")
+	if _, err := resolveDatabaseURL(PasswordSourceAWS); err == nil || !strings.Contains(err.Error(), "DB_HOST") {
+		t.Errorf("출처만 있으면 누락 키 오류여야 한다: %v", err)
+	}
+}
+
 // APP_ENV 가드: 운영 모드에서 DB 미설정을 fail-fast하고, 미인식 값도 거부하며,
 // 개발 기본(빈 값)은 인메모리 폴백을 유지하는지 검증한다.
 func TestLoad_AppEnvGuard(t *testing.T) {
 	// dbKeys는 각 케이스 시작 시 초기화할 DB 관련 env(프로세스 환경 오염 차단).
 	dbKeys := []string{"DATABASE_URL", "DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_PORT", "DB_SSLMODE", "APP_ENV",
-		"DB_SECRET_ARN", "AWS_REGION", "DB_CONN_MAX_LIFETIME", "CLICK_QUEUE_URL"}
+		"DB_SECRET_ARN", "AWS_REGION", "DB_CONN_MAX_LIFETIME", "CLICK_QUEUE_URL",
+		"DB_PASSWORD_SOURCE", "DB_PASSWORD_FILE", "DB_MAX_OPEN_CONNS"}
 
 	cases := []struct {
 		name    string
@@ -128,12 +167,12 @@ func TestLoad_AppEnvGuard(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "production + 완전한 DB_* + 회전 env + 클릭 큐 → 정상(운영 실경로)", // (b)
+			name: "production + DB_* + 출처 aws + 클릭 큐 → 정상(EKS 실경로)", // (b)
 			env: map[string]string{
 				"APP_ENV": "production",
-				"DB_HOST": "h", "DB_USER": "u", "DB_PASSWORD": "pw", "DB_NAME": "n",
-				"DB_SECRET_ARN": testSecretARN, "AWS_REGION": "ap-northeast-2",
-				"CLICK_QUEUE_URL": testClickQueueURL,
+				"DB_HOST": "h", "DB_USER": "u", "DB_NAME": "n",
+				"DB_PASSWORD_SOURCE": "aws", "DB_SECRET_ARN": testSecretARN, "AWS_REGION": "ap-northeast-2",
+				"CLICK_QUEUE_URL": testClickQueueURL, "DB_MAX_OPEN_CONNS": "11",
 			},
 			check: func(t *testing.T, cfg Config) {
 				if cfg.AppEnv != "production" {
@@ -145,25 +184,54 @@ func TestLoad_AppEnvGuard(t *testing.T) {
 				if cfg.ClickQueueURL != testClickQueueURL {
 					t.Errorf("ClickQueueURL = %q", cfg.ClickQueueURL)
 				}
+				if cfg.DBPasswordSource != PasswordSourceAWS || cfg.DBSecretARN != testSecretARN {
+					t.Errorf("출처 %q, ARN %q", cfg.DBPasswordSource, cfg.DBSecretARN)
+				}
+				if cfg.DBMaxOpenConns != 11 {
+					t.Errorf("DBMaxOpenConns = %d, want 11", cfg.DBMaxOpenConns)
+				}
 			},
 		},
 		{
-			// 큐 설정이 빠진 태스크 정의로 새 이미지가 뜨면 메모리 큐로 조용히 돌지 않고 기동에서 멈춘다(plan 0013).
+			name: "production + DB_* + 출처 file → 정상(P6 k3s 경로)", // (b-2)
+			env: map[string]string{
+				"APP_ENV": "production",
+				"DB_HOST": "h", "DB_USER": "u", "DB_NAME": "n",
+				"DB_PASSWORD_SOURCE": "file", "DB_PASSWORD_FILE": "/var/run/secrets/linkpulse/db-password",
+				"CLICK_QUEUE_URL": testClickQueueURL, "AWS_REGION": "ap-northeast-2",
+			},
+			check: func(t *testing.T, cfg Config) {
+				if cfg.DBPasswordSource != PasswordSourceFile || cfg.DBPasswordFile == "" {
+					t.Errorf("출처 %q, 파일 %q", cfg.DBPasswordSource, cfg.DBPasswordFile)
+				}
+			},
+		},
+		{
+			// 큐 설정이 빠진 배포로 새 이미지가 뜨면 메모리 큐로 조용히 돌지 않고 기동에서 멈춘다(plan 0013).
 			name: "production + 클릭 큐 누락 → 에러", // (b-1)
 			env: map[string]string{
 				"APP_ENV": "production",
-				"DB_HOST": "h", "DB_USER": "u", "DB_PASSWORD": "pw", "DB_NAME": "n",
-				"DB_SECRET_ARN": testSecretARN, "AWS_REGION": "ap-northeast-2",
+				"DB_HOST": "h", "DB_USER": "u", "DB_NAME": "n",
+				"DB_PASSWORD_SOURCE": "aws", "DB_SECRET_ARN": testSecretARN, "AWS_REGION": "ap-northeast-2",
 			},
 			wantErr: true,
 		},
 		{
-			// DATABASE_URL 경로는 비밀번호를 DSN 안에만 두고 cfg.DBPassword를 비워 둔다.
-			// 그 상태로 provider를 만들면 seed가 빈 문자열이 되어 2-3 (a)의 폴백이 깨진다.
-			name: "production + DATABASE_URL + DB_SECRET_ARN → 에러", // (c)
+			// DATABASE_URL 경로는 정적 모드 전용이다. 출처와 함께 두면 무엇이 쓰이는지 모호하다.
+			// 개발 모드로 둬 다른 운영 검사(클릭 큐 등)가 대신 실패하지 않게 한다 — 이 조합만이 실패 이유다.
+			name: "DATABASE_URL + 출처 → 에러", // (c)
 			env: map[string]string{
-				"APP_ENV": "production", "DATABASE_URL": "postgres://u:p@h:5432/db?sslmode=disable",
-				"DB_SECRET_ARN": testSecretARN, "AWS_REGION": "ap-northeast-2",
+				"APP_ENV": "", "DATABASE_URL": "postgres://u:p@h:5432/db?sslmode=disable",
+				"DB_PASSWORD_SOURCE": "aws", "DB_SECRET_ARN": testSecretARN,
+			},
+			wantErr: true,
+		},
+		{
+			// 출처 없이 ARN만 있으면(옛 ECS 조합) 막는다 — 회전 대응이 켜졌다고 착각하게 된다.
+			name: "DATABASE_URL + DB_SECRET_ARN(출처 없음) → 에러", // (c-3)
+			env: map[string]string{
+				"APP_ENV": "", "DATABASE_URL": "postgres://u:p@h:5432/db?sslmode=disable",
+				"DB_SECRET_ARN": testSecretARN,
 			},
 			wantErr: true,
 		},
@@ -178,14 +246,41 @@ func TestLoad_AppEnvGuard(t *testing.T) {
 			},
 		},
 		{
-			// 회전 env가 없으면 새 앱이 구 비밀번호로 정상 기동해 smoke까지 통과한다 —
-			// Step 2가 배포되지 않았는데 배포된 것처럼 보이는 경로를 막는다(2-2).
-			name: "production + DB 설정 + DB_SECRET_ARN 누락 → 에러", // (c-2)
+			// 출처가 없으면(정적 DB_PASSWORD) 새 앱이 지금 비밀번호로 정상 기동해 smoke까지 통과한다 —
+			// 회전 대응이 꺼진 채 배포된 것처럼 보이는 경로를 막는다(2-2, plan 0014).
+			name: "production + 정적 DB_PASSWORD(출처 없음) → 에러", // (c-2)
 			env: map[string]string{
 				"APP_ENV": "production",
 				"DB_HOST": "h", "DB_USER": "u", "DB_PASSWORD": "pw", "DB_NAME": "n",
+				"CLICK_QUEUE_URL": testClickQueueURL, "AWS_REGION": "ap-northeast-2",
 			},
 			wantErr: true,
+		},
+		{
+			name: "DB_MAX_OPEN_CONNS 0 → 에러", // (f)
+			env: map[string]string{
+				"DB_HOST": "h", "DB_USER": "u", "DB_PASSWORD": "pw", "DB_NAME": "n", "DB_MAX_OPEN_CONNS": "0",
+			},
+			wantErr: true,
+		},
+		{
+			name: "DB_MAX_OPEN_CONNS 정수 아님 → 에러", // (f-1)
+			env: map[string]string{
+				"DB_HOST": "h", "DB_USER": "u", "DB_PASSWORD": "pw", "DB_NAME": "n", "DB_MAX_OPEN_CONNS": "eleven",
+			},
+			wantErr: true,
+		},
+		{
+			// 미설정이면 지금 동작(25)이 그대로다 — 로컬·기존 배포 불변.
+			name: "DB_MAX_OPEN_CONNS 미설정 → 기본 25", // (f-2)
+			env: map[string]string{
+				"DB_HOST": "h", "DB_USER": "u", "DB_PASSWORD": "pw", "DB_NAME": "n",
+			},
+			check: func(t *testing.T, cfg Config) {
+				if cfg.DBMaxOpenConns != 25 {
+					t.Errorf("DBMaxOpenConns = %d, want 25", cfg.DBMaxOpenConns)
+				}
+			},
 		},
 		{
 			name: "빈 APP_ENV + DB 미설정 → 정상(인메모리)", // (d)
@@ -253,28 +348,40 @@ func TestLoad_AssemblesDSNFromParts(t *testing.T) {
 // testSecretARN은 RDS 관리 시크릿 형식을 재현한 자리표시자다.
 const testSecretARN = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:rds!db-x-AbCdEf"
 
-// production에서 DB_SECRET_ARN이 비면 기동을 막는다.
-// 이 검사가 없으면 새 앱이 구 비밀번호로 정상 기동하고 smoke까지 통과해,
-// Step 2가 배포되지 않았는데 배포된 것처럼 보인다.
-func TestValidateRotationEnv(t *testing.T) {
+// 비밀번호 출처 계약(plan 0014). production은 출처를 요구하고, 출처와 맞지 않는 키는 막는다.
+// 출처가 없으면 새 앱이 지금 비밀번호로 정상 기동하고 smoke까지 통과해,
+// 회전 대응이 꺼진 채 배포된 것처럼 보인다.
+func TestValidatePasswordSource(t *testing.T) {
 	const arn = testSecretARN
+	const file = "/var/run/secrets/linkpulse/db-password"
 
 	tests := []struct {
-		name, appEnv, secretARN, region string
-		wantErr                         string
+		name, appEnv, source, secretARN, file, region string
+		wantErr                                       string
 	}{
-		{name: "production 정상", appEnv: "production", secretARN: arn, region: "ap-northeast-2"},
-		{name: "production ARN 누락", appEnv: "production", secretARN: "", region: "ap-northeast-2", wantErr: "DB_SECRET_ARN"},
-		{name: "production 리전 누락", appEnv: "production", secretARN: arn, region: "", wantErr: "AWS_REGION"},
-		{name: "production 리전 불일치", appEnv: "production", secretARN: arn, region: "us-east-1", wantErr: "다릅니다"},
-		{name: "production ARN 형식 오류", appEnv: "production", secretARN: "not-an-arn", region: "ap-northeast-2", wantErr: "올바르지 않습니다"},
+		{name: "production aws 정상", appEnv: "production", source: "aws", secretARN: arn, region: "ap-northeast-2"},
+		{name: "production aws ARN 누락", appEnv: "production", source: "aws", region: "ap-northeast-2", wantErr: "DB_SECRET_ARN"},
+		{name: "production aws 리전 누락", appEnv: "production", source: "aws", secretARN: arn, wantErr: "AWS_REGION"},
+		{name: "production aws 리전 불일치", appEnv: "production", source: "aws", secretARN: arn, region: "us-east-1", wantErr: "다릅니다"},
+		{name: "production aws ARN 형식 오류", appEnv: "production", source: "aws", secretARN: "not-an-arn", region: "ap-northeast-2", wantErr: "올바르지 않습니다"},
+		{name: "aws에 파일 경로 섞임", appEnv: "production", source: "aws", secretARN: arn, file: file, region: "ap-northeast-2", wantErr: "DB_PASSWORD_FILE"},
+		// 개발에서도 aws면 ARN은 필요하다(SDK 리전이 ARN에서 온다). 리전 교차검사만 생략한다.
+		{name: "development aws ARN 누락", appEnv: "development", source: "aws", wantErr: "DB_SECRET_ARN"},
+		{name: "development aws 리전 없이 통과", appEnv: "development", source: "aws", secretARN: arn},
+		{name: "production file 정상", appEnv: "production", source: "file", file: file},
+		{name: "file 경로 누락", appEnv: "production", source: "file", wantErr: "DB_PASSWORD_FILE"},
+		{name: "file에 ARN 섞임", appEnv: "production", source: "file", file: file, secretARN: arn, wantErr: "DB_SECRET_ARN"},
+		{name: "production 출처 없음", appEnv: "production", wantErr: "DB_PASSWORD_SOURCE"},
+		{name: "출처 없이 ARN만", appEnv: "", secretARN: arn, wantErr: "DB_PASSWORD_SOURCE"},
+		{name: "출처 없이 파일만", appEnv: "", file: file, wantErr: "DB_PASSWORD_SOURCE"},
+		{name: "모르는 출처", appEnv: "", source: "vault", wantErr: "올바르지 않습니다"},
 		// 로컬·개발은 정적 모드라 SDK를 쓰지 않는다 → 검사 생략.
 		{name: "development 전부 비어도 통과", appEnv: "development"},
 		{name: "빈 APP_ENV도 통과", appEnv: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateRotationEnv(tt.appEnv, tt.secretARN, tt.region)
+			err := validatePasswordSource(tt.appEnv, tt.source, tt.secretARN, tt.file, tt.region)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("통과해야 하는데 오류: %v", err)

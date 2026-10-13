@@ -6,8 +6,8 @@
 //   hot    — 링크 1개에 전부 GET /{code}                 : 인기 링크의 행 잠금 경합
 //   read   — 링크 100개에 GET /api/links/{code}(쓰기 없음) : 대조군. 쓰기를 뺀 상한
 //
-// 단계: 50 → 100 → 200 → 400 → 800 → 1600(→ 3200) rps, 단계마다 30초 올리고 2분 30초 유지(= 3분).
-// 기본은 1600까지다(0012 재현). plan 0013 재측정은 MAX_RPS=3200으로 돌린다.
+// 단계: 50 → 100 → 200 → 400 → 800 → 1600(→ 3200 → 6400) rps, 단계마다 30초 올리고 2분 30초 유지(= 3분).
+// 기본은 1600까지다(0012 재현). plan 0013 재측정은 MAX_RPS=3200, plan 0014(EKS·HPA)는 MAX_RPS=6400으로 돌린다.
 // setup이 끝나면 다음 정각(:00초)까지 기다렸다가 시작한다. 그래서 단계마다 유지 구간이
 // CloudWatch의 온전한 1분 두 개를 덮는다(collect-metrics.sh가 이 두 분만 단계 값으로 쓴다).
 import http from 'k6/http';
@@ -23,7 +23,7 @@ const MAX_RPS = Number(__ENV.MAX_RPS || 1600);
 const XFF = __ENV.LOCAL_XFF ? { 'X-Forwarded-For': __ENV.LOCAL_XFF } : {};
 
 // collect-metrics.sh의 단계표와 같아야 한다.
-const ALL_RATES = [50, 100, 200, 400, 800, 1600, 3200];
+const ALL_RATES = [50, 100, 200, 400, 800, 1600, 3200, 6400];
 
 if (!['spread', 'hot', 'read'].includes(SCENARIO)) {
   throw new Error('SCENARIO는 spread|hot|read 중 하나여야 한다');

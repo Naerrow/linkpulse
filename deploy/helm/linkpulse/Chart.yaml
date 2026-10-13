@@ -1,0 +1,6 @@
+apiVersion: v2
+name: linkpulse
+description: linkpulse 앱(단축 URL + 클릭 집계). 사이트(AWS·집)를 모르는 차트다 — 사이트 값은 ConfigMap·Secret 이름으로만 참조한다(plan 0014).
+type: application
+version: 0.1.0
+appVersion: main

@@ -42,12 +42,17 @@ type Config struct {
 	// Postgres 접속 문자열. DATABASE_URL이 있으면 그 값을, 없으면 DB_* 개별 변수로
 	// 조립한 값을 담는다. 비어 있으면 인메모리 저장소를 사용한다. (resolveDatabaseURL 참고)
 	DatabaseURL string
-	// 기동 시 주입된 비밀번호. 회전 대응 provider의 seed로만 쓴다(2-3 (a): ECS가 넣어 준
-	// 값은 그 시점의 AWSCURRENT이므로 유효하다). DATABASE_URL 경로에서는 비어 있다.
-	DBPassword string
-	// 회전 대응에 쓸 시크릿 ARN (DB_SECRET_ARN). 비어 있으면 정적 모드다.
+	// DB 비밀번호 출처 (DB_PASSWORD_SOURCE, plan 0014): ""(정적, DB_PASSWORD)|aws|file.
+	// aws·file이면 앱이 기동 때 직접 읽고 인증 실패 때 다시 읽는다(회전 대응). 이때 DSN에는 비밀번호가 없다.
+	DBPasswordSource string
+	// 회전 대응에 쓸 시크릿 ARN (DB_SECRET_ARN). DB_PASSWORD_SOURCE=aws에서만 쓴다.
 	// 비밀이 아니라 식별자다.
 	DBSecretARN string
+	// 비밀번호 파일 경로 (DB_PASSWORD_FILE). DB_PASSWORD_SOURCE=file에서만 쓴다(P6 k3s의 Secret 마운트).
+	DBPasswordFile string
+	// 연결 풀 최대 연결 수 (DB_MAX_OPEN_CONNS, 기본 25). 파드가 HPA로 늘면 파드 수 × 이 값이
+	// RDS 연결 한도를 넘지 않게 차트가 낮춘다(plan 0014).
+	DBMaxOpenConns int
 	// 배포 시점 교차검사용 리전 (AWS_REGION). SDK 리전의 source of truth가 아니다 —
 	// 그것은 DBSecretARN 파싱값이다.
 	AWSRegion string
@@ -96,7 +101,9 @@ func Load() (Config, error) {
 	}
 
 	// DB 접속 문자열을 해석한다(DATABASE_URL 우선, 없으면 DB_* 조립).
-	dsn, dbPassword, err := resolveDatabaseURL()
+	// 출처가 있으면 비밀번호는 DSN에 넣지 않는다 — 매 연결마다 provider가 준다.
+	passwordSource := os.Getenv("DB_PASSWORD_SOURCE")
+	dsn, err := resolveDatabaseURL(passwordSource)
 	if err != nil {
 		return Config{}, err
 	}
@@ -117,16 +124,23 @@ func Load() (Config, error) {
 
 	// 회전 대응 설정. 같은 자리·같은 형태의 fail-fast다.
 	secretARN := os.Getenv("DB_SECRET_ARN")
+	passwordFile := os.Getenv("DB_PASSWORD_FILE")
 	awsRegion := os.Getenv("AWS_REGION")
-	// DATABASE_URL 경로는 정적 모드 전용이다(로컬 docker-compose). 시크릿 ARN과 함께 두면
-	// provider가 **빈 비밀번호를 seed로** 받아 — DSN에서 쓰는 값은 resolveDatabaseURL이
-	// 돌려주지 않는다 — 첫 연결부터 refresh에 의존하고, SDK가 죽으면 DSN에 유효한 값이
-	// 있어도 기동하지 못한다. 2-3 (a)의 "seed로 정상 기동"이 깨지므로 조합 자체를 막는다.
-	if os.Getenv("DATABASE_URL") != "" && secretARN != "" {
-		return Config{}, errors.New("DATABASE_URL과 DB_SECRET_ARN은 함께 쓸 수 없습니다 — 회전 대응은 DB_* 경로를 씁니다")
+	// DATABASE_URL 경로는 정적 모드 전용이다(로컬 docker-compose). 출처와 함께 두면 DSN 안의
+	// 비밀번호와 provider가 읽는 비밀번호 중 무엇이 쓰이는지 설정만 보고 알 수 없다. 조합 자체를 막는다.
+	if os.Getenv("DATABASE_URL") != "" && passwordSource != "" {
+		return Config{}, errors.New("DATABASE_URL과 DB_PASSWORD_SOURCE는 함께 쓸 수 없습니다 — 회전 대응은 DB_* 경로를 씁니다")
 	}
-	if err := validateRotationEnv(appEnv, secretARN, awsRegion); err != nil {
+	if err := validatePasswordSource(appEnv, passwordSource, secretARN, passwordFile, awsRegion); err != nil {
 		return Config{}, err
+	}
+
+	maxOpenConns, err := getEnvInt("DB_MAX_OPEN_CONNS", db.DefaultMaxOpenConns)
+	if err != nil {
+		return Config{}, err
+	}
+	if maxOpenConns < 1 {
+		return Config{}, fmt.Errorf("DB_MAX_OPEN_CONNS는 1 이상이어야 합니다(현재 %d)", maxOpenConns)
 	}
 
 	connMaxLifetime, rejectedLifetime := resolveConnMaxLifetime()
@@ -154,8 +168,10 @@ func Load() (Config, error) {
 		AppEnv:          appEnv,
 		// 비어 있으면 main에서 인메모리 저장소로 폴백한다(로컬 개발 편의).
 		DatabaseURL:             dsn,
-		DBPassword:              dbPassword,
+		DBPasswordSource:        passwordSource,
 		DBSecretARN:             secretARN,
+		DBPasswordFile:          passwordFile,
+		DBMaxOpenConns:          maxOpenConns,
 		AWSRegion:               awsRegion,
 		ConnMaxLifetime:         connMaxLifetime,
 		ConnMaxLifetimeRejected: rejectedLifetime,
@@ -220,34 +236,66 @@ func parseAdminTokenHash(raw string) ([]byte, error) {
 	return b, nil
 }
 
-// validateRotationEnv는 회전 대응 설정의 production 계약을 강제한다.
+// DB 비밀번호 출처 (DB_PASSWORD_SOURCE, plan 0014). 빈 값은 정적 모드(DB_PASSWORD)다.
+const (
+	PasswordSourceAWS  = "aws"  // Secrets Manager(DB_SECRET_ARN). EKS 기본값.
+	PasswordSourceFile = "file" // 파일(DB_PASSWORD_FILE). P6 k3s에서 쿠버네티스 Secret을 마운트한다.
+)
+
+// validatePasswordSource는 비밀번호 출처 설정의 계약을 강제한다.
 //
-// 왜 fail-fast인가: 이 검사가 없으면 apply 순서 실수·잘못된 task definition base·env 유실이
-// 있어도 새 앱이 **구 비밀번호로 정상 기동**하고 /readyz 200·왕복 302 smoke까지 통과한다 —
-// 즉 Step 2가 배포되지 않았는데 배포된 것처럼 보이고, 다음 회전 때까지 드러나지 않는다.
+// 왜 production에서 출처를 요구하는가: 정적 모드로 뜨면 새 앱이 **지금 비밀번호로 정상 기동**하고
+// /readyz 200·왕복 302 smoke까지 통과한다 — 회전 대응(Step 2)이 꺼진 채 배포된 것처럼 보이고,
+// 다음 회전 때까지 드러나지 않는다.
+//
+// 출처와 맞지 않는 키(file인데 DB_SECRET_ARN 등)도 막는다. 둘 중 무엇이 쓰이는지 설정만 보고 알 수 없게 되기 때문이다.
 //
 // AWS_REGION은 SDK를 동작시키는 값이 아니다(SDK 리전은 ARN 파싱에서 온다). 목적은
-// "task definition이 의도한 리전으로 만들어졌는지"를 배포 시점에 거르는 이중 방어이고,
+// "배포 설정이 의도한 리전으로 만들어졌는지"를 기동 시점에 거르는 이중 방어이고,
 // 그 목적을 살리려면 production에서 빈 값은 "검사 생략"이 아니라 오류여야 한다.
-func validateRotationEnv(appEnv, secretARN, awsRegion string) error {
-	if appEnv != envProduction {
-		// 로컬·개발은 정적 모드라 SDK를 쓰지 않는다.
+func validatePasswordSource(appEnv, source, secretARN, passwordFile, awsRegion string) error {
+	switch source {
+	case "":
+		if appEnv == envProduction {
+			return errors.New("APP_ENV=production인데 DB_PASSWORD_SOURCE가 미설정입니다(aws|file) — 회전 대응 없이 기동 금지")
+		}
+		if secretARN != "" || passwordFile != "" {
+			return errors.New("DB_SECRET_ARN·DB_PASSWORD_FILE은 DB_PASSWORD_SOURCE와 함께 씁니다")
+		}
 		return nil
+	case PasswordSourceAWS:
+		if passwordFile != "" {
+			return errors.New("DB_PASSWORD_SOURCE=aws에서는 DB_PASSWORD_FILE을 쓰지 않습니다")
+		}
+		if secretARN == "" {
+			return errors.New("DB_PASSWORD_SOURCE=aws인데 DB_SECRET_ARN이 미설정입니다")
+		}
+		arnRegion, err := dbcreds.RegionFromSecretARN(secretARN)
+		if err != nil {
+			return fmt.Errorf("DB_SECRET_ARN이 올바르지 않습니다: %w", err)
+		}
+		if appEnv != envProduction {
+			return nil
+		}
+		if awsRegion == "" {
+			return errors.New("APP_ENV=production인데 AWS_REGION이 미설정입니다 — 배포 시점 교차검사 불가")
+		}
+		if arnRegion != awsRegion {
+			return fmt.Errorf("DB_SECRET_ARN의 리전(%s)과 AWS_REGION(%s)이 다릅니다", arnRegion, awsRegion)
+		}
+		return nil
+	case PasswordSourceFile:
+		if secretARN != "" {
+			return errors.New("DB_PASSWORD_SOURCE=file에서는 DB_SECRET_ARN을 쓰지 않습니다")
+		}
+		if passwordFile == "" {
+			return errors.New("DB_PASSWORD_SOURCE=file인데 DB_PASSWORD_FILE이 미설정입니다")
+		}
+		return nil
+	default:
+		return fmt.Errorf("DB_PASSWORD_SOURCE가 올바르지 않습니다(허용: %s|%s, 빈 값=정적): %q",
+			PasswordSourceAWS, PasswordSourceFile, source)
 	}
-	if secretARN == "" {
-		return errors.New("APP_ENV=production인데 DB_SECRET_ARN이 미설정입니다 — 회전 대응 없이 기동 금지")
-	}
-	if awsRegion == "" {
-		return errors.New("APP_ENV=production인데 AWS_REGION이 미설정입니다 — 배포 시점 교차검사 불가")
-	}
-	arnRegion, err := dbcreds.RegionFromSecretARN(secretARN)
-	if err != nil {
-		return fmt.Errorf("DB_SECRET_ARN이 올바르지 않습니다: %w", err)
-	}
-	if arnRegion != awsRegion {
-		return fmt.Errorf("DB_SECRET_ARN의 리전(%s)과 AWS_REGION(%s)이 다릅니다", arnRegion, awsRegion)
-	}
-	return nil
 }
 
 // resolveConnMaxLifetime은 DB_CONN_MAX_LIFETIME을 읽는다.
@@ -294,28 +342,33 @@ func validatePublicBaseURL(raw string) error {
 //
 // 우선순위:
 //  1. DATABASE_URL이 설정돼 있으면 그대로 사용한다(로컬 docker-compose 하위호환).
-//  2. 아니면 DB_HOST/DB_USER/DB_PASSWORD/DB_NAME으로 URL을 조립한다. 운영(ECS)에서는
-//     비밀번호를 Secrets Manager에서 DB_PASSWORD로만 분리 주입하기 위함이다(가드레일 #2).
-//  3. 핵심 4개가 모두 비어 있으면 빈 문자열을 돌려준다 → 호출부가 인메모리로 폴백한다.
+//  2. 아니면 DB_HOST/DB_USER/DB_PASSWORD/DB_NAME으로 URL을 조립한다. 비밀번호를 코드가 아니라
+//     env로만 받기 위함이다(가드레일 #2).
+//     비밀번호 출처(source: aws|file)가 있으면 DB_PASSWORD 대신 출처가 비밀번호를 준다 — DSN에는
+//     비밀번호를 넣지 않고, DB_PASSWORD가 함께 있으면 무엇이 쓰이는지 모호하므로 막는다.
+//  3. 핵심 키와 출처가 모두 비어 있으면 빈 문자열을 돌려준다 → 호출부가 인메모리로 폴백한다.
 //
-// 핵심 4개(DB_HOST/DB_USER/DB_PASSWORD/DB_NAME) 중 하나라도 설정되면 4개 전부를 필수
+// 핵심 키(DB_HOST/DB_USER/DB_NAME, 정적 모드면 DB_PASSWORD까지) 중 하나라도 설정되면 전부를 필수
 // 검사하고, 누락된 키를 명시해 에러를 반환한다 — 운영에서 일부만 주입돼 조용히 인메모리로
 // 떠 데이터가 증발하는 사고를 막는다(fail-fast). DB_PORT/DB_SSLMODE는 기본값(5432/require)이
 // 있는 보조값이라 이 트리거에서 제외한다.
-func resolveDatabaseURL() (dsn, password string, err error) {
+func resolveDatabaseURL(source string) (string, error) {
 	if raw := os.Getenv("DATABASE_URL"); raw != "" {
 		// 이 경로는 로컬 docker-compose 전용이라 회전 provider를 쓰지 않는다(정적 모드).
-		return raw, "", nil
+		return raw, nil
 	}
 
 	host := os.Getenv("DB_HOST")
 	user := os.Getenv("DB_USER")
-	password = os.Getenv("DB_PASSWORD")
+	password := os.Getenv("DB_PASSWORD")
 	name := os.Getenv("DB_NAME")
 
-	// 핵심 4개가 전부 비면 DB 미설정으로 보고 인메모리로 폴백한다(로컬 개발 편의).
-	if host == "" && user == "" && password == "" && name == "" {
-		return "", "", nil
+	// 전부 비면 DB 미설정으로 보고 인메모리로 폴백한다(로컬 개발 편의).
+	if host == "" && user == "" && password == "" && name == "" && source == "" {
+		return "", nil
+	}
+	if source != "" && password != "" {
+		return "", errors.New("DB_PASSWORD_SOURCE를 쓰면 DB_PASSWORD를 비워야 합니다 — 비밀번호는 출처에서 읽습니다")
 	}
 
 	// 하나라도 설정됐으면 전부 필수 — 어떤 키가 빠졌는지 알려 준다(fail-fast).
@@ -326,14 +379,14 @@ func resolveDatabaseURL() (dsn, password string, err error) {
 	if user == "" {
 		missing = append(missing, "DB_USER")
 	}
-	if password == "" {
+	if password == "" && source == "" {
 		missing = append(missing, "DB_PASSWORD")
 	}
 	if name == "" {
 		missing = append(missing, "DB_NAME")
 	}
 	if len(missing) > 0 {
-		return "", "", fmt.Errorf("DB 접속 설정이 일부만 지정됐습니다. 누락: %s", strings.Join(missing, ", "))
+		return "", fmt.Errorf("DB 접속 설정이 일부만 지정됐습니다. 누락: %s", strings.Join(missing, ", "))
 	}
 
 	port := getEnv("DB_PORT", "5432")
@@ -341,14 +394,18 @@ func resolveDatabaseURL() (dsn, password string, err error) {
 
 	// url.URL로 조립해 비밀번호의 특수문자를 안전하게 퍼센트 인코딩한다
 	// (RDS가 생성한 비밀번호에 @ / 등이 섞여도 DSN이 깨지지 않게).
+	userInfo := url.UserPassword(user, password)
+	if source != "" {
+		userInfo = url.User(user)
+	}
 	u := url.URL{
 		Scheme:   "postgres",
-		User:     url.UserPassword(user, password),
+		User:     userInfo,
 		Host:     net.JoinHostPort(host, port),
 		Path:     "/" + name,
 		RawQuery: url.Values{"sslmode": {sslmode}}.Encode(),
 	}
-	return u.String(), password, nil
+	return u.String(), nil
 }
 
 // getEnv는 환경변수를 읽되, 비어 있으면 기본값을 돌려준다.

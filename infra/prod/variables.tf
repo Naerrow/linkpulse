@@ -44,7 +44,7 @@ variable "public_subnet_cidrs" {
 }
 
 variable "app_subnet_cidrs" {
-  description = "앱(프라이빗) 서브넷 CIDR. ECS 태스크 배치."
+  description = "앱(프라이빗) 서브넷 CIDR. EKS 노드·파드(VPC CNI가 파드 IP를 여기서 받는다)·컨트롤 플레인 ENI 배치."
   type        = list(string)
   default     = ["10.0.10.0/24", "10.0.11.0/24"]
 }
@@ -55,90 +55,29 @@ variable "data_subnet_cidrs" {
   default     = ["10.0.20.0/24", "10.0.21.0/24"]
 }
 
-# ---- 앱 / ECS ----
-variable "image_tag" {
-  description = "Terraform이 등록하는 baseline/초기 task definition의 이미지 태그. service.task_definition은 ignore_changes라 `terraform apply -var image_tag=<sha>`로는 running 서비스가 이 태그로 옮겨지지 않는다(새 revision만 등록됨). 평상시·비상 배포·롤백은 모두 CI(main push/workflow_dispatch) 또는 직접 `aws ecs update-service`로 한다."
+# ---- EKS (plan 0014) ----
+variable "eks_version" {
+  description = "EKS 쿠버네티스 버전. 표준 지원 중 최신으로 고정한다 — apply 전 `aws eks describe-cluster-versions`의 status가 STANDARD_SUPPORT인지 확인한다. 바꾸면 노드·애드온도 따라 바뀐다."
   type        = string
-  default     = "bootstrap"
+  default     = "1.37"
 }
 
-variable "service_desired_count" {
-  description = "ECS 서비스 목표 태스크 수(운영 정상값 2). 최초 부트스트랩(이미지 없음) 때만 -var service_desired_count=0으로 인프라를 먼저 만든다."
+variable "node_instance_type" {
+  description = "관리형 노드 인스턴스 타입. ARM64(Graviton)여야 한다 — 노드 그룹 ami_type이 AL2023_ARM_64_STANDARD다."
+  type        = string
+  default     = "t4g.medium"
+}
+
+variable "node_count" {
+  description = "노드 수(최소·최대·희망이 모두 이 값). 오토스케일러가 없어 고정이다. 앱 최대 7개와 시스템 파드가 2대에 들어간다(ADR 0007 노드 수용)."
   type        = number
   default     = 2
-}
-
-variable "task_cpu" {
-  description = "Fargate 태스크 CPU 단위(256 = 0.25 vCPU)."
-  type        = string
-  default     = "256"
-}
-
-variable "task_memory" {
-  description = "Fargate 태스크 메모리(MiB)."
-  type        = string
-  default     = "512"
-}
-
-variable "task_cpu_architecture" {
-  description = "태스크 CPU 아키텍처. ARM64(Graviton, 저렴) 또는 X86_64. 이미지 빌드 아키텍처와 반드시 일치해야 한다."
-  type        = string
-  default     = "ARM64"
-}
-
-variable "admin_token_sha256" {
-  description = "관리자 토큰의 SHA-256 해시(16진수 64자). 원문이 아니다. 비우면 관리자 기능이 꺼진다(plan 0011)."
-  type        = string
-  default     = ""
-  # 토큰이 외우는 비밀번호라 해시도 비밀로 다룬다 — plan 출력이 공개 PR에 붙는다(ecs.tf 주석 참고).
-  sensitive = true
-
-  validation {
-    condition     = can(regex("^([0-9a-fA-F]{64})?$", var.admin_token_sha256))
-    error_message = "admin_token_sha256은 빈 값이거나 SHA-256 해시(16진수 64자)여야 한다. 토큰 원문을 넣지 않았는지 확인한다."
-  }
-}
-
-variable "rate_limit_exempt_ips" {
-  description = "레이트리밋 예외 IPv4(쉼표 구분). 한계 측정(plan 0012) 동안 측정 클라이언트만 풀어 준다. tfvars에 쓰지 않고 측정 apply의 -var로만 준다."
-  type        = string
-  default     = ""
-  # 측정 클라이언트의 집 IP다. plan 출력이 공개 PR에 붙으므로 값이 찍히지 않게 한다.
-  sensitive = true
-
-  # 잘못된 값이 기동 실패 → 서킷브레이커 롤백까지 가지 않고 plan에서 걸리게 한다.
-  # 앱(RATE_LIMIT_EXEMPT_IPS)은 IPv6도 받지만, 측정 IP는 checkip.amazonaws.com의 IPv4라 여기서는 IPv4만 허용한다.
-  validation {
-    condition = var.rate_limit_exempt_ips == "" || alltrue([
-      for ip in split(",", var.rate_limit_exempt_ips) :
-      can(regex("^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$", ip))
-    ])
-    error_message = "rate_limit_exempt_ips는 빈 값이거나 쉼표로 구분한 IPv4 목록(공백 없이)이어야 한다."
-  }
-}
-
-variable "log_level" {
-  description = "앱 LOG_LEVEL."
-  type        = string
-  default     = "info"
-}
-
-variable "short_code_length" {
-  description = "앱 SHORT_CODE_LENGTH."
-  type        = number
-  default     = 7
 }
 
 variable "log_retention_days" {
   description = "CloudWatch 로그 보관 일수."
   type        = number
   default     = 14
-}
-
-variable "enable_container_insights" {
-  description = "ECS Container Insights 활성화(관측성↑, 비용↑). P3에서 켬 — RunningTaskCount 등 태스크 레벨 메트릭 확보. 끄려면 tfvars에서 false."
-  type        = bool
-  default     = true
 }
 
 variable "enable_alb_access_logs" {
@@ -158,12 +97,6 @@ variable "alarm_sms_number" {
   type        = string
   default     = ""
   sensitive   = true
-}
-
-variable "ecr_force_delete" {
-  description = "ECR repo 삭제 시 이미지까지 강제 삭제할지 여부. 개발용 full destroy 때만 true로 넘긴다."
-  type        = bool
-  default     = false
 }
 
 # ---- RDS ----
@@ -219,13 +152,6 @@ variable "db_skip_final_snapshot" {
   description = "삭제 시 최종 스냅샷 생략. 운영은 false(스냅샷 남김)."
   type        = bool
   default     = false
-}
-
-# ---- GitHub OIDC / CI(P2) ----
-variable "existing_github_oidc_provider_arn" {
-  description = "계정에 이미 있는 GitHub Actions OIDC 공급자(token.actions.githubusercontent.com) ARN. 비우면 새로 만든다. apply 전 `aws iam list-open-id-connect-providers`로 확인해 이미 있으면 그 ARN을 지정한다(중복 생성 EntityAlreadyExists 회피)."
-  type        = string
-  default     = ""
 }
 
 # ---- 모니터링 / Slack 알림 (P3) ----

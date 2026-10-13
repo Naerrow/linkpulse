@@ -23,24 +23,24 @@ Built and operated as a production service, with a focus on reliability and obse
 
 ## 아키텍처 (클라우드)
 
-사용자 → Route53 → ALB(HTTPS, ACM) → ECS Fargate(app, 태스크 2개) → RDS(PostgreSQL)
-모든 리소스는 Terraform으로 관리(IaC)되며, VPC의 퍼블릭/프라이빗 서브넷으로 분리되어 있습니다.
+사용자 → Route53 → ALB(HTTPS, ACM) → EKS 파드(app, HPA 2~6개) → RDS(PostgreSQL)
+클릭은 리다이렉트와 분리돼 SQS로 모아 반영합니다. 모든 AWS 리소스는 Terraform으로 관리(IaC)되며, VPC의 퍼블릭/프라이빗 서브넷으로 분리되어 있습니다.
 
 - IaC: Terraform · 클라우드: AWS(ap-northeast-2)
-- 런타임: ECS Fargate · 인그레스: ALB + ACM
-- 데이터: RDS PostgreSQL(마스터 비밀번호는 Secrets Manager가 7일마다 자동 회전)
-- CI/CD: GitHub Actions(빌드·테스트·ECR·롤링 배포)
-- 관측성: CloudWatch(구조화 로깅·지표·알람)
+- 런타임: EKS(관리형 노드 t4g.medium 2대) · 인그레스: 기존 ALB + TargetGroupBinding(AWS Load Balancer Controller)
+- 데이터: RDS PostgreSQL(마스터 비밀번호는 Secrets Manager가 7일마다 자동 회전) · 큐: SQS
+- CI/CD: GitHub Actions(빌드·테스트·GHCR 푸시) → ArgoCD + Image Updater(GitOps 배포) · 차트: Helm(`deploy/helm/linkpulse`)
+- 관측성: CloudWatch(구조화 로깅·지표·알람, 로그는 Fluent Bit)
 
-> 진행 단계: **P0~P4 완료(2026-10-07, Redis 캐시만 P5로 이관)** — 클라우드(ECS Fargate) 단독 운영 체계를 갖췄다.
-> 다음은 **P5 AWS 완성**(한계 측정 → 클릭 집계 비동기화 → EKS·ArgoCD → Prometheus/Grafana) → **P6 하이브리드**(홈랩 k3s + VPN)
+> 진행 단계: **P0~P4 완료(2026-10-07, Redis 캐시만 P5로 이관)** — 클라우드(ECS Fargate) 단독 운영 체계를 갖췄다. **P5 진행 중** — 한계 측정(0012)·클릭 집계 비동기화(0013) 완료, ECS→EKS(0014) 전환.
+> 다음은 **P5 AWS 완성**(Prometheus/Grafana) → **P6 하이브리드**(홈랩 k3s + VPN)
 > → **P7 온프레미스**(전부 집으로 이전). 최종적으로 셋 사이를 양방향으로 자유롭게 이전할 수 있게 만든다.
 
 ## 운영 (operations)
 
-- 자동 배포: `main` 머지 시 GitHub Actions가 빌드·테스트 후 ECS 롤링 배포(OIDC, 장기 키 없음). 이전 이미지로의 롤백은 `workflow_dispatch` 한 번
-- 탐지: CloudWatch 알람(ALB 5xx·지연·ECS·RDS) + 외부 카나리(Route53 헬스체크가 `/readyz`를 30초마다 호출) → Slack·SMS
-- **비밀번호 회전 자동 복구**: 회전이 일어나면 앱이 새 비밀번호를 런타임에 다시 읽어 스스로 회복하고, 동시에 자동 재배포가 뒤를 받친다. 실측 503 약 61초, 사람 개입 없음([ADR 0006](docs/adr/0006-runtime-db-credentials.md)). 이전에는 회전마다 수 시간~수 일 다운됐다
+- 자동 배포: `main` 머지 시 GitHub Actions가 빌드·테스트 후 GHCR에 이미지(arm64+amd64)를 올리고, 클러스터 안의 Image Updater·ArgoCD가 롤링 배포한다(CI에 AWS 권한 없음). 롤백은 ArgoCD에서 이미지를 고정한다([ADR 0007](docs/adr/0007-ecs-to-eks.md))
+- 탐지: CloudWatch 알람(ALB 5xx·지연·RDS·클릭 큐) + 외부 카나리(Route53 헬스체크가 `/readyz`를 30초마다 호출) → Slack·SMS
+- **비밀번호 회전 자동 복구**: 회전이 일어나면 앱이 새 비밀번호를 런타임에 다시 읽어 스스로 회복한다. 실측 503 약 61초, 사람 개입 없음([ADR 0006](docs/adr/0006-runtime-db-credentials.md)). 이전에는 회전마다 수 시간~수 일 다운됐다
 - 백업: RDS 자동 백업 + 복원 리허설([ADR 0005](docs/adr/0005-backup-restore-dr.md), [`rds-restore.md`](docs/runbooks/rds-restore.md))
 - 장애 대응: 알람별 런북([`alarm-response.md`](docs/runbooks/alarm-response.md)), 실제 장애·GameDay 회고([`docs/postmortems/`](docs/postmortems/))
 - 부하: k6로 한도 안 p95 10ms, 한도 밖 429 보호, 클릭 집계 유실 0 확인([`load/k6/`](load/k6/))
@@ -93,21 +93,22 @@ cd app && ADMIN_TOKEN_SHA256=c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b200
 
 ```
 /app    애플리케이션 + 테스트
-/infra  Terraform (VPC, ECS, ALB, RDS, IAM, 알람·카나리, 회전 자동 재배포 Lambda)
+/infra  Terraform (prod: VPC, EKS, ALB, RDS, SQS, IAM, 알람·카나리 / k8s: 클러스터 안 컨트롤러·사이트 값)
+/deploy  Helm 차트(사이트를 모르는 앱 차트)
 /.github/workflows  CI/CD
 /docs   ADR · 계획(plans) · 런북 · 장애 회고
 /load   k6 부하 테스트 · GameDay 장애 주입 이미지
-/scripts  prod 전체 재기동·삭제 스크립트
+/scripts  prod 전체 재기동·삭제 스크립트, 차트 검사
 ```
 
-## 인프라 배포 (P1, Terraform)
+## 인프라 배포 (Terraform)
 
-AWS(ap-northeast-2) ECS Fargate 배포의 상세 런북은 [`infra/README.md`](infra/README.md)에 있습니다. 요약:
+AWS(ap-northeast-2) EKS 배포의 상세 런북은 [`infra/README.md`](infra/README.md)에 있습니다. 요약:
 
-- `infra/bootstrap` → state용 S3 버킷, `infra/prod` → 본 인프라(VPC·ALB·ECS·RDS·IAM).
+- `infra/bootstrap` → state용 S3 버킷, `infra/prod` → AWS 리소스(VPC·ALB·EKS·RDS·SQS·IAM), `infra/k8s` → 클러스터 안(LB 컨트롤러·ArgoCD·Fluent Bit·사이트 값).
 - **모든 `apply`는 사람이 직접**, **Terraform 1.10+** 필요(S3 네이티브 lockfile, DynamoDB 미사용).
-- 순서: bootstrap apply → prod init → `-var service_desired_count=0` apply → GitHub Variables 등록 → CI(GitHub Actions)가 이미지 빌드·배포 → `apply`로 desired=2.
-- **이미지 배포는 GitHub Actions(P2)가, `terraform apply`는 인프라·스케일만** 담당합니다(경계: [`docs/adr/0001-cicd-terraform-ci-boundary.md`](docs/adr/0001-cicd-terraform-ci-boundary.md)).
+- 순서: bootstrap apply → prod apply → k8s apply → ArgoCD가 앱을 동기화. 켜고 끄기는 `scripts/full-apply-prod.sh`·`full-destroy-prod.sh`.
+- **이미지는 CI가 GHCR에 올리고 배포는 ArgoCD가**, `terraform apply`는 인프라만 담당합니다(경계: [ADR 0007](docs/adr/0007-ecs-to-eks.md)).
 
 ## 라이선스
 

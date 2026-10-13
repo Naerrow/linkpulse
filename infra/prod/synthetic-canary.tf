@@ -15,7 +15,7 @@
 # 갈 수 있어 us-east-1 전용 토픽을 둔다. 이 토픽을 기존 Chatbot config(chatbot.tf)에 크로스리전으로
 # 추가 바인딩해 같은 Slack 채널로 통지한다(ADR 0002가 검증한 패턴). 헬스체크 리소스 자체는 글로벌이라
 # 기존 route53_acm.tf와 동일하게 기본 provider(ap-northeast-2)로 만든다.
-# data.aws_caller_identity.current 는 github_oidc.tf 에 선언돼 있어 재사용한다(재선언 금지).
+# data.aws_caller_identity.current 는 iam.tf 에 선언돼 있어 재사용한다(재선언 금지).
 
 # ---- us-east-1 전용 SNS 토픽 (canary 알람 통지 팬아웃) ----
 # 기본 provider(ap-northeast-2)로 만들면 us-east-1 토픽 ARN에 ap-northeast-2 API로 접근해 apply가

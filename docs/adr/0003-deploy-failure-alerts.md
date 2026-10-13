@@ -1,6 +1,6 @@
 # ADR 0003 — 배포 실패 알림(EventBridge → SNS → Chatbot → Slack)
 
-- 상태: 채택 (2026-07-10)
+- 상태: 채택 (2026-07-10). **plan 0014에서 폐기 — ECS가 없어졌다. ArgoCD 동기화 실패 알림은 0015([ADR 0007](0007-ecs-to-eks.md)).**
 - 관련: AGENTS.md 가드레일 #1(인프라 변경은 사람 승인), Phase P4(하드닝), [`docs/plans/0005-p4-deploy-failure-alerts/plan.md`](../plans/0005-p4-deploy-failure-alerts/plan.md), 재사용 경로는 [ADR 0002](0002-alerting-design.md)
 
 ## 맥락

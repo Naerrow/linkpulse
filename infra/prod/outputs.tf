@@ -8,45 +8,19 @@ output "app_url" {
   value       = "https://${var.domain_name}"
 }
 
-output "ecr_repository_url" {
-  description = "앱 이미지 push 대상 ECR URL."
-  value       = aws_ecr_repository.app.repository_url
-}
-
 output "rds_address" {
   description = "RDS 엔드포인트 호스트(비밀번호는 Secrets Manager 보관)."
   value       = aws_db_instance.main.address
 }
 
-output "ecs_cluster_name" {
-  description = "ECS 클러스터 이름."
-  value       = aws_ecs_cluster.main.name
-}
-
-output "ecs_service_name" {
-  description = "ECS 서비스 이름."
-  value       = aws_ecs_service.app.name
+output "eks_cluster_name" {
+  description = "EKS 클러스터 이름. kubeconfig: aws eks update-kubeconfig --name <이 값> --region ap-northeast-2. infra/k8s도 이 이름으로 클러스터를 찾는다."
+  value       = aws_eks_cluster.main.name
 }
 
 output "cloudwatch_log_group" {
-  description = "앱 로그 그룹."
+  description = "앱 로그 그룹(Fluent Bit가 보낸다). collect-metrics.sh의 LOG_GROUP 인자."
   value       = aws_cloudwatch_log_group.app.name
-}
-
-# ---- P2 CI/CD용 (GitHub repo Variables에 등록) ----
-output "github_actions_role_arn" {
-  description = "GitHub Actions가 OIDC로 assume하는 배포 role ARN. GitHub repo Variable AWS_DEPLOY_ROLE_ARN."
-  value       = aws_iam_role.github_actions_deploy.arn
-}
-
-output "ecs_task_definition_family" {
-  description = "ECS task definition family. CI가 describe-task-definition base로 사용. GitHub Variable ECS_TASK_DEFINITION_FAMILY."
-  value       = aws_ecs_task_definition.app.family
-}
-
-output "ecr_repository_name" {
-  description = "ECR 리포지토리 이름(URL 아님). aws ecr describe-images --repository-name용. GitHub Variable ECR_REPOSITORY_NAME."
-  value       = aws_ecr_repository.app.name
 }
 
 # ---- P3 관측성/알림 ----

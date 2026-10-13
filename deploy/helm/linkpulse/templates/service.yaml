@@ -1,0 +1,17 @@
+# ClusterIP다. ALB는 이 Service의 엔드포인트(파드 IP)를 TargetGroupBinding으로 받아 파드로 바로 보낸다
+# (클라이언트 → ALB → 파드, XFF 한 홉 — 레이트리밋의 rlTrustedHops = 1이 그대로 맞는다).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "linkpulse.fullname" . }}
+  labels:
+    {{- include "linkpulse.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "linkpulse.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP

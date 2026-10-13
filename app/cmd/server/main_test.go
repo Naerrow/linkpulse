@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -101,5 +103,35 @@ func TestDrainClicks(t *testing.T) {
 	}
 	if !f.hadDeadline {
 		t.Error("마지막 flush에 상한(마감 시각)이 없다")
+	}
+}
+
+// newPasswordFetch는 출처마다 맞는 조회 함수를 고른다(plan 0014).
+// file은 그 경로를 읽고, aws는 네트워크 없이 클라이언트만 만든다. 모르는 출처는 오류다.
+func TestNewPasswordFetch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db-password")
+	if err := os.WriteFile(path, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fetch, err := newPasswordFetch(context.Background(), config.Config{
+		DBPasswordSource: config.PasswordSourceFile, DBPasswordFile: path,
+	})
+	if err != nil {
+		t.Fatalf("file 출처 실패: %v", err)
+	}
+	if got, err := fetch(context.Background()); err != nil || got != "from-file" {
+		t.Errorf("file 출처가 %q, %v를 읽었다 — 파일 내용이어야 한다", got, err)
+	}
+
+	fetch, err = newPasswordFetch(context.Background(), config.Config{
+		DBPasswordSource: config.PasswordSourceAWS,
+		DBSecretARN:      "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:rds!db-x-AbCdEf",
+	})
+	if err != nil || fetch == nil {
+		t.Errorf("aws 출처 실패: %v", err)
+	}
+
+	if _, err := newPasswordFetch(context.Background(), config.Config{DBPasswordSource: "vault"}); err == nil {
+		t.Error("모르는 출처인데 오류가 아니다")
 	}
 }

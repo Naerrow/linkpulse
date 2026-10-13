@@ -23,11 +23,12 @@ var schemaSQL string
 // DSN 문자열 하나를 받던 경계를 바꾼 이유는 회전 대응 provider와 검증용 손잡이를
 // 명시적으로 주입하기 위해서다(plan 0009 2-2).
 type Settings struct {
-	// DSN은 접속 정보다. 여기 담긴 비밀번호는 secret 모드에서 provider의 seed로만 쓰이고,
-	// 실제 dial 비밀번호는 매 시도마다 provider가 준다.
+	// DSN은 접속 정보다. secret 모드에서는 비밀번호가 없고, 실제 dial 비밀번호는 매 시도마다 provider가 준다.
 	DSN string
 	// ConnMaxLifetime은 커넥션 최대 수명이다. 0이면 기본값(5분)을 쓴다.
 	ConnMaxLifetime time.Duration
+	// MaxOpenConns는 풀의 최대 연결 수다. 0이면 기본값(25)을 쓴다. 유휴 연결 상한도 같은 값이다.
+	MaxOpenConns int
 	// Provider가 nil이 아니면 인증 실패를 관찰해 비밀번호를 갱신하는 connector로 연다.
 	// nil이면 기존 정적 동작 그대로다(로컬 docker-compose).
 	Provider *dbcreds.Provider
@@ -37,6 +38,9 @@ type Settings struct {
 // **커넥션 수명 기본값의 단일 출처다** — config도 이 상수를 참조한다. 두 곳에 따로 두면
 // 한쪽만 바뀌었을 때 기동 로그 두 줄(logProviderMode·Open)이 서로 다른 "실효값"을 말한다.
 const DefaultConnMaxLifetime = 5 * time.Minute
+
+// DefaultMaxOpenConns는 Settings.MaxOpenConns가 0일 때 쓰는 값이다. config도 이 상수를 참조한다(단일 출처).
+const DefaultMaxOpenConns = 25
 
 // Open은 설정으로 연결 풀을 만들고, DB가 준비될 때까지 핑을 재시도한 뒤 스키마를 멱등 적용한다.
 // 어느 단계든 실패하면 풀을 닫고 에러를 반환한다(기동 중단, fail-fast).
@@ -59,9 +63,13 @@ func Open(ctx context.Context, s Settings) (*sql.DB, error) {
 		lifetime = DefaultConnMaxLifetime
 	}
 
-	// 작은 서비스에 맞춘 보수적 풀 설정. 부하 테스트(P4) 결과에 따라 조정한다.
-	pool.SetMaxOpenConns(25)
-	pool.SetMaxIdleConns(25)
+	// 작은 서비스에 맞춘 보수적 풀 설정. 파드가 늘어나는 곳(EKS HPA)에서는 env로 낮춘다(plan 0014).
+	maxOpen := s.MaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = DefaultMaxOpenConns
+	}
+	pool.SetMaxOpenConns(maxOpen)
+	pool.SetMaxIdleConns(maxOpen)
 	pool.SetConnMaxLifetime(lifetime)
 	// SetConnMaxIdleTime은 그대로 둔다 — 신규 연결을 유도하는 것은 lifetime 쪽이다.
 	pool.SetConnMaxIdleTime(5 * time.Minute)
@@ -76,7 +84,7 @@ func Open(ctx context.Context, s Settings) (*sql.DB, error) {
 		return nil, fmt.Errorf("스키마 적용 실패: %w", err)
 	}
 
-	slog.Info("Postgres 연결·스키마 적용 완료", "conn_max_lifetime", lifetime.String())
+	slog.Info("Postgres 연결·스키마 적용 완료", "conn_max_lifetime", lifetime.String(), "max_open_conns", maxOpen)
 	return pool, nil
 }
 
