@@ -7,14 +7,17 @@ Usage:
   ./scripts/full-destroy-prod.sh --drop-dev-db
   ./scripts/full-destroy-prod.sh --drop-dev-db --plan-only
 
-Destroys the infra/prod Terraform stack for development cost saving.
+Destroys linkpulse prod for development cost saving (plan 0014: EKS). Order matters:
+
+  1. in-cluster finalizers: delete the ArgoCD Application and the TargetGroupBinding while their
+     controllers (ArgoCD, LB controller) are still alive, and verify none remain
+  2. infra/k8s   terraform destroy (Helm releases, namespaces)
+  3. infra/prod  terraform destroy (EKS, ALB, NAT/EIP, VPC, RDS, CloudWatch logs/alarms, SNS/Chatbot, IAM)
 
 Keeps:
   - infra/bootstrap state bucket, because it is a separate Terraform stack
   - domain registration and the existing Route53 hosted zone, because prod only reads the zone
-
-Deletes from infra/prod:
-  - ECS, ALB, NAT/EIP, VPC, RDS, CloudWatch logs/alarms, SNS/Chatbot, ECR repo/images, IAM/OIDC resources
+  - GHCR images (not AWS)
 
 The --drop-dev-db flag is required because this deletes the RDS database without a final snapshot.
 EOF
@@ -49,22 +52,25 @@ if [[ "$DROP_DEV_DB" != "true" ]]; then
   exit 2
 fi
 
-if ! command -v terraform >/dev/null 2>&1; then
-  echo "terraform is required." >&2
-  exit 127
-fi
+for tool in terraform aws kubectl; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "$tool is required." >&2
+    exit 127
+  fi
+done
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROD_DIR="$ROOT_DIR/infra/prod"
+K8S_DIR="$ROOT_DIR/infra/k8s"
+REGION="ap-northeast-2"
+CLUSTER_NAME="linkpulse-prod-eks"
 
-cd "$PROD_DIR"
-
-if [[ ! -f backend.hcl ]]; then
+if [[ ! -f "$PROD_DIR/backend.hcl" ]]; then
   echo "Missing infra/prod/backend.hcl. Create it from backend.hcl.example first." >&2
   exit 1
 fi
 
-if [[ ! -f terraform.tfvars ]]; then
+if [[ ! -f "$PROD_DIR/terraform.tfvars" ]]; then
   echo "Missing infra/prod/terraform.tfvars. Create it from terraform.tfvars.example first." >&2
   exit 1
 fi
@@ -72,7 +78,6 @@ fi
 DESTROY_VARS=(
   "-var=db_deletion_protection=false"
   "-var=db_skip_final_snapshot=true"
-  "-var=ecr_force_delete=true"
 )
 
 STATE_LIST=""
@@ -106,56 +111,103 @@ confirm() {
   fi
 }
 
-echo "== linkpulse prod full destroy =="
-echo "This is destructive and intended only for the current no-user development phase."
-echo "RDS final snapshot will be skipped, CloudWatch logs will be deleted, and ECR images will be removed."
-echo "If this prod stack owns the GitHub OIDC provider, that provider will be deleted too."
-echo
-
-terraform init -input=false -backend-config=backend.hcl
-
-WORKSPACE="$(terraform workspace show)"
-if [[ "$WORKSPACE" != "default" ]]; then
-  echo "Refusing to run outside the default Terraform workspace. Current: $WORKSPACE" >&2
-  exit 1
-fi
-
-load_state_list
+require_default_workspace() {
+  local workspace
+  workspace="$(terraform workspace show)"
+  if [[ "$workspace" != "default" ]]; then
+    echo "Refusing to run outside the default Terraform workspace. Current: $workspace" >&2
+    exit 1
+  fi
+}
 
 PREP_PLAN="$(mktemp -t linkpulse-prod-destroy-prep.XXXXXX.tfplan)"
 DESTROY_PLAN="$(mktemp -t linkpulse-prod-destroy.XXXXXX.tfplan)"
+K8S_DESTROY_PLAN="$(mktemp -t linkpulse-k8s-destroy.XXXXXX.tfplan)"
 cleanup() {
-  rm -f "$PREP_PLAN" "$DESTROY_PLAN"
+  rm -f "$PREP_PLAN" "$DESTROY_PLAN" "$K8S_DESTROY_PLAN"
 }
 trap cleanup EXIT
 
-PREP_TARGETS=()
-if state_has "aws_db_instance.main"; then
-  PREP_TARGETS+=("-target=aws_db_instance.main")
-fi
-if state_has "aws_ecr_repository.app"; then
-  PREP_TARGETS+=("-target=aws_ecr_repository.app")
+echo "== linkpulse prod full destroy (EKS) =="
+echo "This is destructive and intended only for the current no-user development phase."
+echo "RDS final snapshot will be skipped and CloudWatch logs will be deleted."
+
+CLUSTER_EXISTS=false
+if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$REGION" >/dev/null 2>&1; then
+  CLUSTER_EXISTS=true
 fi
 
-if [[ ${#PREP_TARGETS[@]} -gt 0 ]]; then
+echo
+if [[ "$CLUSTER_EXISTS" != "true" ]]; then
+  echo "Step 1/3: EKS cluster $CLUSTER_NAME not found; skipping in-cluster cleanup."
+elif [[ "$PLAN_ONLY" == "true" ]]; then
+  echo "Step 1/3: plan-only - would delete Application linkpulse and TargetGroupBinding(s) first."
+else
+  echo "Step 1/3: delete finalizer-bearing objects while their controllers are alive."
+  # Application(resources-finalizer)은 ArgoCD가, TGB는 LB 컨트롤러가 살아 있어야 지워진다. terraform destroy가
+  # 컨트롤러 릴리스를 먼저 또는 동시에 지우면 finalizer에 걸려 네임스페이스·destroy가 멈춘다(ADR 0007).
+  aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION"
+  kubectl -n argocd delete application linkpulse --ignore-not-found --wait --timeout=5m
+  kubectl -n linkpulse delete targetgroupbindings.elbv2.k8s.aws --all --ignore-not-found --wait --timeout=5m
+  LEFT_APPS="$(kubectl -n argocd get applications.argoproj.io -o name 2>/dev/null || true)"
+  LEFT_TGBS="$(kubectl -n linkpulse get targetgroupbindings.elbv2.k8s.aws -o name 2>/dev/null || true)"
+  if [[ -n "$LEFT_APPS" || -n "$LEFT_TGBS" ]]; then
+    echo "Finalizer-bearing objects remain; refusing to destroy controllers under them:" >&2
+    echo "$LEFT_APPS $LEFT_TGBS" >&2
+    echo "See docs/runbooks/alarm-response.md (EKS: stuck finalizer)." >&2
+    exit 1
+  fi
+  echo "OK: no Application / TargetGroupBinding left."
+fi
+
+echo
+echo "Step 2/3: infra/k8s destroy."
+cd "$K8S_DIR"
+terraform init -input=false -backend-config=../prod/backend.hcl
+require_default_workspace
+load_state_list
+if [[ -z "$STATE_LIST" ]]; then
+  echo "infra/k8s state is empty; skipping."
+elif [[ "$CLUSTER_EXISTS" != "true" ]]; then
+  # 클러스터가 먼저 사라졌다면 helm·kubernetes provider가 붙을 곳이 없다. 클러스터 안의 것은 클러스터와 함께 사라졌다.
+  echo "infra/k8s has state but the cluster is gone. Remove the stale state by hand:" >&2
+  echo "  (cd infra/k8s && terraform state list | xargs -n1 terraform state rm)" >&2
+  exit 1
+else
+  terraform plan -destroy -input=false -out="$K8S_DESTROY_PLAN"
+  if [[ "$PLAN_ONLY" == "true" ]]; then
+    echo "Plan-only mode: infra/k8s destroy plan was shown but not applied."
+  else
+    confirm "destroy linkpulse k8s" "Type 'destroy linkpulse k8s' to delete the infra/k8s stack:"
+    terraform apply -input=false "$K8S_DESTROY_PLAN"
+  fi
+fi
+
+echo
+echo "Step 3/3: infra/prod destroy."
+cd "$PROD_DIR"
+terraform init -input=false -backend-config=backend.hcl
+require_default_workspace
+load_state_list
+
+if state_has "aws_db_instance.main"; then
   echo
-  echo "Step 1/3: plan deletion-prep changes only for RDS/ECR."
-  terraform plan -input=false -out="$PREP_PLAN" "${PREP_TARGETS[@]}" "${DESTROY_VARS[@]}"
+  echo "Deletion-prep: plan RDS changes only (deletion protection off, skip final snapshot)."
+  terraform plan -input=false -out="$PREP_PLAN" -target=aws_db_instance.main "${DESTROY_VARS[@]}"
 
   if [[ "$PLAN_ONLY" == "true" ]]; then
     echo
     echo "Plan-only mode: prep plan was shown but not applied."
   else
-    confirm "prepare destroy" "Type 'prepare destroy' to disable RDS deletion protection / enable ECR force delete:"
+    confirm "prepare destroy" "Type 'prepare destroy' to disable RDS deletion protection:"
     terraform apply -input=false "$PREP_PLAN"
   fi
 else
-  echo
-  echo "Step 1/3: no RDS/ECR resources found in state; skipping deletion-prep."
+  echo "No RDS instance in state; skipping deletion-prep."
 fi
 
 echo
-echo "Step 2/3: plan full prod destroy."
+echo "Plan full prod destroy."
 terraform plan -destroy -input=false -out="$DESTROY_PLAN" "${DESTROY_VARS[@]}"
 
 if [[ "$PLAN_ONLY" == "true" ]]; then
@@ -164,10 +216,9 @@ if [[ "$PLAN_ONLY" == "true" ]]; then
   exit 0
 fi
 
-echo
-echo "Step 3/3: apply full prod destroy."
 confirm "destroy linkpulse prod" "Type 'destroy linkpulse prod' to delete the infra/prod stack:"
 terraform apply -input=false "$DESTROY_PLAN"
 
 echo
-echo "Done. infra/prod has been destroyed. infra/bootstrap state bucket was not touched."
+echo "Done. infra/k8s and infra/prod have been destroyed. infra/bootstrap state bucket was not touched."
+echo "Verify: (cd infra/prod && terraform state list | wc -l) and (cd infra/k8s && terraform state list | wc -l) are both 0."

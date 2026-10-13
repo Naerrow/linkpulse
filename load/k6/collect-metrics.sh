@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # plan 0012 — capacity.js 한 번의 실행을 분 단위·단계 단위 표(Markdown)로 모은다.
 #
-# 사용법: load/k6/collect-metrics.sh <시작_epoch> <k6_csv(.gz 가능)> [MAX_RPS]
+# 사용법: load/k6/collect-metrics.sh <시작_epoch> <k6_csv(.gz 가능)> [MAX_RPS] [LOG_GROUP]
 #   시작_epoch: capacity.js setup이 찍은 "시나리오 시작 … epoch=" 값(정각)
 #   MAX_RPS:    k6 실행 때 준 값(기본 1600). 단계표를 capacity.js와 같은 규칙으로 자른다.
+#   LOG_GROUP:  앱 로그 그룹(기본 /ecs/<PREFIX>-app — 0012·0013 재수집). EKS(plan 0014)는 /eks/linkpulse-prod/app.
+#
+# EKS 실행이면 record-pods.sh가 CSV 옆에 남긴 <이름>-pods.tsv·-hpa.tsv를 읽어 "파드·HPA" 절을 덧붙인다.
+# 그 파일이 없으면(0012·0013) 출력은 예전과 같다. ECS CPU 열은 EKS에서 비어 나온다(Container Insights를 켜지 않았다).
 #
 # 실행이 끝나고 3분쯤 뒤, destroy 전에 돌린다 — 지표·로그가 늦게 들어오고, destroy하면 로그 그룹이 사라진다.
 # 읽기 전용 AWS 호출만 쓴다(describe-load-balancers, get-metric-data, logs start-query/get-query-results).
@@ -17,6 +21,9 @@ CSV=${2:?k6 CSV 경로가 필요하다}
 MAX_RPS=${3:-1600}
 REGION=${AWS_REGION:-ap-northeast-2}
 PREFIX=${NAME_PREFIX:-linkpulse-prod}
+LOG_GROUP=${4:-/ecs/$PREFIX-app}
+# 파드 CPU 요청(차트 values.yaml resources.requests.cpu, 밀리코어). 파드 CPU %의 분모다 — HPA도 같은 분모를 쓴다.
+POD_CPU_REQUEST_M=${POD_CPU_REQUEST_M:-250}
 
 if [[ ! $START =~ ^[0-9]+$ ]]; then
   echo "시작 epoch가 숫자가 아니다: $START" >&2
@@ -30,7 +37,7 @@ fi
 
 # capacity.js의 ALL_RATES와 같아야 한다.
 STAGES=()
-for r in 50 100 200 400 800 1600 3200; do
+for r in 50 100 200 400 800 1600 3200 6400; do
   if (( r <= MAX_RPS )); then STAGES+=("$r"); fi
 done
 if (( ${#STAGES[@]} == 0 )); then
@@ -87,7 +94,7 @@ cp "$TMP/cw.json" "$RAW-cw.json"
 # insights <쿼리> <출력 파일> [끝 epoch] — 끝을 주지 않으면 단계 구간의 끝(END)까지다.
 insights() {
   local qid status
-  qid=$(aws logs start-query --region "$REGION" --log-group-name "/ecs/$PREFIX-app" \
+  qid=$(aws logs start-query --region "$REGION" --log-group-name "$LOG_GROUP" \
     --start-time "$START" --end-time "${3:-$END}" --query-string "$1" --query queryId --output text)
   for _ in $(seq 90); do
     aws logs get-query-results --region "$REGION" --query-id "$qid" --output json > "$2"
@@ -120,6 +127,26 @@ cp "$TMP/pool.json" "$RAW-pool.json"
 cp "$TMP/fail.json" "$RAW-fail.json"
 cp "$TMP/cq.json" "$RAW-cq.json"
 cp "$TMP/cons.json" "$RAW-cons.json"
+
+# ---- 파드·HPA 기록(EKS, record-pods.sh) — 분마다 모은다. 없으면 빈 객체다. ----
+# pods.tsv: epoch, 파드, CPU(밀리코어), 메모리(MiB) / hpa.tsv: epoch, 현재 파드 수, 목표 파드 수, HPA CPU %
+PODS_FILE="$RAW-pods.tsv"
+HPA_FILE="$RAW-hpa.tsv"
+if [[ -r $PODS_FILE ]]; then
+  awk -F'\t' '{ m = $1 - $1 % 60; k = m SUBSEP $2; n[m]++; sum[m] += $3; if ($3 > mx[m]) mx[m] = $3
+                 if (!(k in seen)) { seen[k] = 1; pods[m]++ } }
+    END { for (m in n) printf "{\"t\":%d,\"pods\":%d,\"avg\":%.1f,\"max\":%d}\n", m, pods[m], sum[m] / n[m], mx[m] }' "$PODS_FILE" \
+    | jq -s 'map({key: (.t | tostring), value: .}) | from_entries' > "$TMP/pods.json"
+else
+  echo '{}' > "$TMP/pods.json"
+fi
+if [[ -r $HPA_FILE ]]; then
+  awk -F'\t' '{ m = $1 - $1 % 60; if ($2 > cur[m]) cur[m] = $2; if ($3 > des[m]) des[m] = $3; if ($4 > util[m]) util[m] = $4; seen[m] = 1 }
+    END { for (m in seen) printf "{\"t\":%d,\"cur\":%d,\"des\":%d,\"util\":%d}\n", m, cur[m], des[m], util[m] }' "$HPA_FILE" \
+    | jq -s 'map({key: (.t | tostring), value: .}) | from_entries' > "$TMP/hpa.json"
+else
+  echo '{}' > "$TMP/hpa.json"
+fi
 
 # teardown이 찍은 DB 합계(k6 실행 로그가 CSV와 같은 이름으로 옆에 있을 때).
 DB_TOTAL=$(grep -o 'DB 클릭 합계 = [0-9]*' "$RAW.log" 2>/dev/null | grep -o '[0-9]*$' | tail -1 || true)
@@ -219,3 +246,37 @@ jq -nr --argjson start "$START" --argjson stages "$STAGES_JSON" --arg dbtotal "$
           "- DB 합계(teardown) = **\(if $dbtotal == "" then "-" else $dbtotal end)** (applied와 같아야 한다)"
      end)
 '
+
+# ---- 파드·HPA (EKS) — 기록 파일이 있을 때만 덧붙인다 ----
+if [[ -r $PODS_FILE || -r $HPA_FILE ]]; then
+  jq -nr --argjson start "$START" --argjson stages "$STAGES_JSON" --argjson req "$POD_CPU_REQUEST_M" \
+    --slurpfile pods "$TMP/pods.json" --slurpfile hpa "$TMP/hpa.json" --slurpfile pool "$TMP/pool.json" '
+    def bints: .[0:10] + "T" + .[11:19] + "Z" | fromdateiso8601 | tostring;
+    def rows($r): $r | map(map({key: .field, value: .value}) | from_entries);
+    def byminute: map({key: (.["bin(1m)"] | bints), value: (map_values(tonumber? // .))}) | from_entries;
+    def r1: if . == null then null else . * 10 | round / 10 end;
+    def pct: if . == null then null else . / $req * 100 end;
+    def show: if . == null then "-" else tostring end;
+    def maxn: map(select(. != null)) | max;
+    def avgn: map(select(. != null)) | if length == 0 then null else add / length end;
+    (rows($pool[0].results) | byminute) as $p
+    | $pods[0] as $k | $hpa[0] as $h
+    | [ range(0; $stages | length) as $i | range(1; 3) as $j
+        | ($start + ($i * 3 + $j) * 60 | tostring) as $t
+        | { stage: $stages[$i], t: ($t | tonumber),
+            log_pods: $p[$t].tasks, top_pods: $k[$t].pods,
+            cpu_avg: ($k[$t].avg | pct), cpu_max: ($k[$t].max | pct),
+            hpa_cur: $h[$t].cur, hpa_des: $h[$t].des, hpa_util: $h[$t].util } ] as $rows
+    | "",
+      "### 파드·HPA (EKS — record-pods.sh 30초 기록, 파드 CPU %는 요청 \($req)m 대비)",
+      "",
+      "| 단계 rps | 분(UTC) | 파드 수(로그 task_id) | 파드 수(top) | 파드 CPU 평균/최대 % | HPA 현재/목표 | HPA CPU % |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      ($rows[] | "| \(.stage) | \(.t | todate | .[11:16]) | \(.log_pods | show) | \(.top_pods | show) | \(.cpu_avg | r1 | show)/\(.cpu_max | r1 | show) | \(.hpa_cur | show)/\(.hpa_des | show) | \(.hpa_util | show) |"),
+      "",
+      "| 단계 rps | 파드 수 최대(로그) | 파드 CPU 평균/최대 % | HPA 목표 최대 | HPA CPU % 최대 |",
+      "| --- | --- | --- | --- | --- |",
+      ($rows | group_by(.stage)[] | . as $g
+       | "| \($g[0].stage) | \($g | map(.log_pods) | maxn | show) | \($g | map(.cpu_avg) | avgn | r1 | show)/\($g | map(.cpu_max) | maxn | r1 | show) | \($g | map(.hpa_des) | maxn | show) | \($g | map(.hpa_util) | maxn | show) |")
+  '
+fi
