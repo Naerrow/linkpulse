@@ -47,14 +47,14 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 | # | 도구 | 명령 |
 | --- | --- | --- |
 | R-1 | **[사람]** 롤백(이미지 고정) | 배포는 Image Updater가 `main` 다이제스트를 따라가며 한다. 롤백은 (1) Image Updater를 멈추고 (2) ArgoCD Application에 직전 이미지를 고정한다. 직전 이미지는 옛 ReplicaSet에 남아 있다(`kubectl -n linkpulse get rs -o custom-columns=CREATED:.metadata.creationTimestamp,IMAGE:.spec.template.spec.containers[0].image --sort-by=.metadata.creationTimestamp`) — `linkpulse:` 뒤(`main@sha256:…`)가 tag 값이다. 아래 ①②. git sha로 고정해도 된다(CI가 `<sha>` 태그도 민다) |
-| R-1x | **[사람]** 롤백 해제 | 수정이 머지돼 GHCR `main`이 새 이미지가 된 뒤: `kubectl -n argocd patch application linkpulse --type json -p '[{"op":"remove","path":"/spec/source/helm/parameters"}]'` → `kubectl -n argocd scale deploy/argocd-image-updater --replicas=1`. Image Updater가 현재 `main` 다이제스트를 다시 넣는다 |
+| R-1x | **[사람]** 롤백 해제 | 수정이 머지돼 GHCR `main`이 새 이미지가 된 뒤: `kubectl -n argocd patch application linkpulse --type json -p '[{"op":"remove","path":"/spec/source/helm/parameters"}]'` → `kubectl -n argocd scale deploy/argocd-image-updater-controller --replicas=1`. Image Updater가 현재 `main` 다이제스트를 다시 넣는다 |
 | R-2 | **[사람]** ArgoCD 강제 동기화 | Deployment가 없거나 git과 다를 때. selfHeal이 보통 알아서 맞춘다. 바로 맞추려면 `kubectl -n argocd annotate application linkpulse argocd.argoproj.io/refresh=hard --overwrite` |
 | R-3 | **[사람]** 파드 전체 재기동(이미지 그대로) | `kubectl -n linkpulse rollout restart deploy/linkpulse` — 한 번에 하나씩 바꾸고(surge 1) 새 파드가 ALB에서 healthy가 된 뒤 옛 파드를 뺀다. **배포 사고 진행 중엔 금지** — 지금 이미지가 문제 이미지일 수 있다(그 상황은 R-1) |
 | R-4 | 로그 조회 | CloudWatch Logs Insights, 그룹 `/eks/linkpulse-prod/app`(Fluent Bit) — 쿼리 모음은 `infra/README.md`. 지금 막 뜨는 로그는 `kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --prefix --since=15m --tail=200` |
 | R-5 | 타깃 헬스 확인 | `aws elbv2 describe-target-health --region ap-northeast-2 --target-group-arn $(aws elbv2 describe-target-groups --names linkpulse-prod-tg --query 'TargetGroups[0].TargetGroupArn' --output text --region ap-northeast-2)` — 타깃은 파드 IP다. 등록이 안 되면 LB 컨트롤러: `kubectl -n linkpulse describe targetgroupbinding linkpulse`, `kubectl -n kube-system logs deploy/aws-load-balancer-controller --tail=50` |
 | R-6 | 죽은 파드의 사인(死因) | `kubectl -n linkpulse describe pod <pod>`의 `Last State`(Reason·Exit Code: `OOMKilled`/137=메모리, 1=앱 에러) → `kubectl -n linkpulse logs <pod> --previous`. 이미지 문제면 이벤트에 `ImagePullBackOff`(GHCR 패키지가 공개인지, 태그가 있는지) |
 
-①: `kubectl -n argocd scale deploy/argocd-image-updater --replicas=0` — 멈추지 않으면 다음 주기에 `main` 다이제스트로 다시 덮어쓴다.
+①: `kubectl -n argocd scale deploy/argocd-image-updater-controller --replicas=0` — 멈추지 않으면 다음 주기에 `main` 다이제스트로 다시 덮어쓴다.
 ②: `kubectl -n argocd patch application linkpulse --type merge -p '{"spec":{"source":{"helm":{"parameters":[{"name":"image.tag","value":"<위 tag 값 또는 git sha>"}]}}}}'` — ArgoCD가 곧바로 롤링한다. `kubectl -n linkpulse rollout status deploy/linkpulse`로 끝을 본다.
 배포 전 기준선(B-1)으로 **지금 이미지(`kubectl -n linkpulse get deploy linkpulse -o jsonpath='{.spec.template.spec.containers[0].image}'`)를 기록해 두는 것**이 원칙이다.
 
@@ -285,7 +285,7 @@ aws cloudwatch describe-alarm-history --alarm-name <알람명> --history-item-ty
 ### EKS 운영 (plan 0014)
 
 - **ArgoCD 보기**: 인터넷에 열지 않았다. 상태는 0-4의 `kubectl`로 충분하다. 화면이 필요하면 `kubectl -n argocd port-forward svc/argocd-server 8443:443` → https://localhost:8443, 사용자 `admin`. 초기 비밀번호는 `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d` — **그 출력은 대화·문서에 붙여 넣지 않는다**(클러스터를 지우면 바뀌는 일회용이지만 원칙은 같다).
-- **배포가 반영되지 않을 때**: GHCR에 새 `main`이 올라갔는지(Actions `deploy`) → Image Updater 로그(`kubectl -n argocd logs deploy/argocd-image-updater --tail=50`) → Application의 `image.tag` 파라미터(`kubectl -n argocd get application linkpulse -o jsonpath='{.spec.source.helm.parameters}'`) 순서로 본다. Image Updater를 0개로 줄여 둔 채(R-1)라면 반영되지 않는 게 정상이다.
+- **배포가 반영되지 않을 때**: GHCR에 새 `main`이 올라갔는지(Actions `deploy`) → Image Updater 로그(`kubectl -n argocd logs deploy/argocd-image-updater-controller --tail=50`) → Application의 `image.tag` 파라미터(`kubectl -n argocd get application linkpulse -o jsonpath='{.spec.source.helm.parameters}'`) 순서로 본다. Image Updater를 0개로 줄여 둔 채(R-1)라면 반영되지 않는 게 정상이다.
 - **사이트 값을 바꿀 때**(관리자 해시, 레이트리밋 예외 등): `infra/k8s` apply 뒤 `kubectl -n linkpulse rollout restart deploy/linkpulse` — envFrom은 ConfigMap·Secret 변경을 다시 읽지 않는다. 관리자 해시는 `infra/k8s/terraform.tfvars`에 있다(plan 0014 전에는 `infra/prod/terraform.tfvars`).
 - **생성·삭제 순서**: 생성은 `infra/prod` → `infra/k8s`(컨트롤러 → site(ConfigMap·Secret·TGB) → gitops(Application·ImageUpdater)). 삭제는 역순이고, **Application과 TargetGroupBinding을 각 컨트롤러가 살아 있을 때 먼저 지운다**(finalizer). `scripts/full-apply-prod.sh`·`full-destroy-prod.sh`가 이 순서대로 한다.
 - **finalizer에 걸려 삭제가 멈췄을 때**(컨트롤러가 먼저 사라짐 — `kubectl get ... ` 결과에 `deletionTimestamp`가 있는데 안 지워짐): 컨트롤러가 다시 살 수 없다면 finalizer를 손으로 뗀다 **[사람]**. 그 경우 컨트롤러가 하던 정리(ArgoCD는 앱 리소스 삭제, LB 컨트롤러는 타깃 등록 해제)가 일어나지 않는다 — 타깃 그룹은 `infra/prod` destroy가 통째로 지우니 남는 것은 없다.
