@@ -1,0 +1,12 @@
+# 노드 교체(관리형 노드 그룹 업데이트) 중에도 최소 한 개는 남긴다.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "linkpulse.fullname" . }}
+  labels:
+    {{- include "linkpulse.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "linkpulse.selectorLabels" . | nindent 6 }}

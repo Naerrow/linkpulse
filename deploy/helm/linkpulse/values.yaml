@@ -1,0 +1,58 @@
+# linkpulse 차트 기본값.
+#
+# 이 차트는 사이트를 모른다(plan 0014). RDS 주소·시크릿 ARN·큐 URL 같은 사이트 값은 사이트가 만든
+# ConfigMap·Secret에 있고, 차트는 그 이름만 참조한다(envFrom). AWS는 infra/k8s가, P6 집 k3s는 그쪽 IaC가 넣는다.
+# 사이트마다 다른 값만 values-<사이트>.yaml에 둔다.
+
+image:
+  repository: ghcr.io/naerrow/linkpulse
+  # ArgoCD Image Updater가 `main` 태그의 다이제스트를 ArgoCD 파라미터로 덮어쓴다("main@sha256:...").
+  # 롤백은 `argocd app set linkpulse -p image.tag=<예전 sha>`로 고정한다(docs/runbooks/alarm-response.md).
+  tag: main
+  pullPolicy: IfNotPresent
+
+# 사이트가 넣는 설정의 이름. 차트는 내용을 모른다.
+site:
+  configMapName: linkpulse-site
+  secretName: linkpulse-site-secret
+
+# DB_PASSWORD_SOURCE=file(P6)에서만 쓴다. 비어 있으면 마운트하지 않는다(AWS는 aws 출처라 쓰지 않는다).
+# 회전 때 kubelet이 파일을 바꿀 수 있게 subPath 없이 디렉터리로 마운트한다. 앱은 DB_PASSWORD_FILE 경로를 읽는다.
+dbPasswordSecret:
+  name: ""
+  mountPath: /var/run/secrets/linkpulse
+
+# 파드 하나의 DB 연결 상한(DB_MAX_OPEN_CONNS).
+# RDS t4g.micro 한도는 약 112, 연결 알람은 80이다. (HPA 최대 6 + 롤링 surge 1) × 11 = 77 < 80.
+# maxReplicas를 바꾸면 이 값도 다시 계산한다.
+dbMaxOpenConns: 11
+
+# Fargate 태스크(0.25 vCPU·512MiB)와 같은 크기다. 0012·0013과 비교하려고 맞췄다.
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 250m
+    memory: 512Mi
+
+# HPA는 CPU 요청의 60%에서 늘린다. 0013에서 태스크 CPU 50~70%부터 p99가 올랐다 — 그 전에 늘린다.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 60
+
+# HPA를 끌 때만 쓴다(켜져 있으면 spec.replicas를 렌더하지 않는다 — ArgoCD selfHeal이 HPA 값을 되돌리지 않게).
+replicaCount: 2
+
+serviceAccount:
+  # 이름이 EKS Pod Identity 연결(infra/prod)의 키다. 바꾸면 그쪽도 바꾼다.
+  name: linkpulse
+
+service:
+  port: 8080
+
+# 종료 순서: preStop sleep(LB에서 빠질 시간) → SIGTERM → 앱 종료(HTTP 10초 + 마지막 클릭 flush 5초).
+preStopSleepSeconds: 10
+terminationGracePeriodSeconds: 45

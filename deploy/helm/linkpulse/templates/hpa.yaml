@@ -1,0 +1,23 @@
+{{- if .Values.autoscaling.enabled }}
+# CPU 요청 대비 사용률로 늘린다. 줄일 때는 기본 안정화 5분을 그대로 둔다.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "linkpulse.fullname" . }}
+  labels:
+    {{- include "linkpulse.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "linkpulse.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
