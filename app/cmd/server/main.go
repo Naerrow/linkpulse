@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -35,7 +36,8 @@ const (
 	// clickStatsInterval은 "click queue" 통계 로그 주기다(db pool 로그와 같다).
 	clickStatsInterval = 10 * time.Second
 	// finalFlushTimeout은 종료 때 마지막 클릭 발행의 상한이다(SDK 재시도 포함).
-	// HTTP 종료(최대 shutdownTimeout 10초) + 이 값 + 워커 중지가 ECS의 SIGKILL(30초) 안에 든다.
+	// HTTP 종료(최대 shutdownTimeout 10초) + 이 값 + 워커 중지가 SIGKILL 전 유예 안에 든다
+	// (차트 terminationGracePeriodSeconds 45초에서 preStop 10초를 뺀 35초).
 	finalFlushTimeout = 5 * time.Second
 )
 
@@ -69,16 +71,20 @@ func main() {
 	var repo links.Store
 	var readiness func(context.Context) error
 	if cfg.DatabaseURL != "" {
-		// DB_SECRET_ARN이 있으면 회전 대응 provider를 붙인다. 없으면 정적 모드다(로컬).
+		// DB_PASSWORD_SOURCE가 있으면 회전 대응 provider를 붙인다. 없으면 정적 모드다(로컬).
 		var provider *dbcreds.Provider
-		if cfg.DBSecretARN != "" {
-			fetch, err := dbcreds.NewSecretsManagerFetch(context.Background(), cfg.DBSecretARN)
+		if cfg.DBPasswordSource != "" {
+			fetch, err := newPasswordFetch(context.Background(), cfg)
 			if err != nil {
-				slog.Error("Secrets Manager 설정 실패", "error", err)
+				slog.Error("DB 비밀번호 출처 설정 실패", "error", err)
 				os.Exit(1)
 			}
-			// seed는 ECS가 주입한 값 — 그 시점의 AWSCURRENT이므로 유효하다(2-3 (a)).
-			provider = dbcreds.New(cfg.DBPassword, fetch)
+			// seed는 기동 때 출처에서 직접 읽는다(plan 0014). ECS처럼 넣어 주는 주체가 없다.
+			provider, err = dbcreds.Start(context.Background(), fetch)
+			if err != nil {
+				slog.Error("DB 비밀번호 조회 실패", "error", err)
+				os.Exit(1)
+			}
 			// 풀보다 뒤에 닫히도록 여기서 defer한다(LIFO) — 진행 중 refresh를 취소한다.
 			defer provider.Close()
 		}
@@ -87,6 +93,7 @@ func main() {
 		pool, err := db.Open(context.Background(), db.Settings{
 			DSN:             cfg.DatabaseURL,
 			ConnMaxLifetime: cfg.ConnMaxLifetime,
+			MaxOpenConns:    cfg.DBMaxOpenConns,
 			Provider:        provider,
 		})
 		if err != nil {
@@ -205,7 +212,7 @@ type flusher interface {
 // drainClicks는 진행 중 요청이 끝난 뒤 클릭 파이프라인을 닫는다(plan 0013 "태스크 정상 종료: 유실 없음"의 경로).
 //
 //  1. stop — 주기 flush·워커·통계를 멈춘다. 통계 고루틴은 이때 마지막 증가분을 찍는다(HTTP가 닫혀 더는 Record가 없다).
-//  2. 마지막 flush — 상한 timeout. ECS가 SIGTERM 30초 뒤 SIGKILL하기 전에 끝나도록 잡았다.
+//  2. 마지막 flush — 상한 timeout. SIGKILL 전에 끝나도록 잡았다(위 finalFlushTimeout 주석).
 //  3. done이 모두 닫힐 때까지 기다린다 — 워커가 반영 중이던 배치와 통계 마지막 줄이 프로세스 종료로 잘리지 않게.
 //
 // 메모리 큐(로컬)는 워커가 먼저 멈추므로 마지막 배치는 반영되지 않는다 — SQS면 큐에 남아 다른 태스크가 반영한다.
@@ -244,6 +251,19 @@ func newServer(cfg config.Config, handler http.Handler) *http.Server {
 	}
 }
 
+// newPasswordFetch는 비밀번호 출처에 맞는 조회 함수를 만든다(plan 0014).
+// 두 출처는 이 함수만 다르다 — 회전 뒤 다시 읽는 경로(provider·connector)는 같다.
+func newPasswordFetch(ctx context.Context, cfg config.Config) (dbcreds.FetchFunc, error) {
+	switch cfg.DBPasswordSource {
+	case config.PasswordSourceAWS:
+		return dbcreds.NewSecretsManagerFetch(ctx, cfg.DBSecretARN)
+	case config.PasswordSourceFile:
+		return dbcreds.NewFileFetch(cfg.DBPasswordFile), nil
+	default:
+		return nil, fmt.Errorf("알 수 없는 비밀번호 출처: %q", cfg.DBPasswordSource)
+	}
+}
+
 // logProviderMode는 기동 시 provider 모드와 커넥션 수명을 한 줄로 남긴다.
 //
 // 2-5 smoke가 이 줄로 "Step 2 코드가 실제로 도는 이미지인지"를 확인한다 — task definition의
@@ -259,7 +279,10 @@ func logProviderMode(p *dbcreds.Provider, cfg config.Config) {
 		"secret_provider_mode", mode,
 		"conn_max_lifetime", cfg.ConnMaxLifetime.String(),
 	}
-	if mode == "secret" {
+	if cfg.DBPasswordSource != "" {
+		attrs = append(attrs, "password_source", cfg.DBPasswordSource)
+	}
+	if cfg.DBPasswordSource == config.PasswordSourceAWS {
 		// ARN 자체가 아니라 시크릿 이름만 남긴다(계정 ID를 로그에 흘리지 않는다).
 		attrs = append(attrs, "secret_name", secretNameFromARN(cfg.DBSecretARN))
 	}

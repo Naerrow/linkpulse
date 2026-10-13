@@ -27,6 +27,8 @@ func TestTaskIDFromMetadata(t *testing.T) {
 func TestTaskIDFailuresFallBackToUnknown(t *testing.T) {
 	t.Run("환경변수 없음(로컬)", func(t *testing.T) {
 		t.Setenv("ECS_CONTAINER_METADATA_URI_V4", "")
+		t.Setenv("POD_NAME", "")
+		t.Setenv("HOSTNAME", "")
 		if got := TaskID(context.Background()); got != TaskIDUnknown {
 			t.Errorf("task_id %q — unknown이어야 한다", got)
 		}
@@ -69,6 +71,41 @@ func TestTaskIDFailuresFallBackToUnknown(t *testing.T) {
 		t.Setenv("ECS_CONTAINER_METADATA_URI_V4", "http://127.0.0.1:1")
 		if got := TaskID(context.Background()); got != TaskIDUnknown {
 			t.Errorf("task_id %q — unknown이어야 한다", got)
+		}
+	})
+}
+
+// 쿠버네티스(plan 0014): ECS 메타데이터가 없으면 POD_NAME, 그다음 HOSTNAME을 쓴다.
+// ECS 메타데이터가 있으면 그것이 우선이다(파드 이름 env가 함께 있어도).
+func TestTaskIDFallbackOrder(t *testing.T) {
+	t.Run("POD_NAME이 HOSTNAME보다 먼저", func(t *testing.T) {
+		t.Setenv("ECS_CONTAINER_METADATA_URI_V4", "")
+		t.Setenv("POD_NAME", "linkpulse-7d9f-abcde")
+		t.Setenv("HOSTNAME", "host-x")
+		if got := TaskID(context.Background()); got != "linkpulse-7d9f-abcde" {
+			t.Errorf("task_id %q — POD_NAME이어야 한다", got)
+		}
+	})
+
+	t.Run("POD_NAME이 없으면 HOSTNAME", func(t *testing.T) {
+		t.Setenv("ECS_CONTAINER_METADATA_URI_V4", "")
+		t.Setenv("POD_NAME", "")
+		t.Setenv("HOSTNAME", "linkpulse-7d9f-fghij")
+		if got := TaskID(context.Background()); got != "linkpulse-7d9f-fghij" {
+			t.Errorf("task_id %q — HOSTNAME이어야 한다", got)
+		}
+	})
+
+	t.Run("ECS 메타데이터가 있으면 그것이 먼저", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"TaskARN":"arn:aws:ecs:ap-northeast-2:123456789012:task/c/ecs123"}`))
+		}))
+		defer srv.Close()
+		t.Setenv("ECS_CONTAINER_METADATA_URI_V4", srv.URL)
+		t.Setenv("POD_NAME", "pod-x")
+		t.Setenv("HOSTNAME", "host-x")
+		if got := TaskID(context.Background()); got != "ecs123" {
+			t.Errorf("task_id %q — ECS 태스크 ID여야 한다", got)
 		}
 	})
 }
