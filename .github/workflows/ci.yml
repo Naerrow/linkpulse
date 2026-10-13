@@ -1,5 +1,5 @@
-# PR 검증 + deploy.yml이 재사용(workflow_call)하는 Go/Docker 체크.
-# push 트리거는 두지 않는다 — main push는 deploy.yml이 이 워크플로를 호출하므로 중복 실행을 막는다.
+# PR 검증: Go 체크 + Helm 차트 검사 + Docker 멀티 아키텍처 빌드.
+# push 트리거는 두지 않는다 — main push는 deploy.yml이 같은 Go 체크를 하고 이미지를 푸시한다.
 name: ci
 
 on:
@@ -39,27 +39,33 @@ jobs:
       - name: 통합 테스트 컴파일 검사
         run: go vet -tags=integration ./...
 
-      # rotation-redeploy Lambda의 handler 테스트. 별도 job으로 나누지 않는 이유는 러너 배정을
-      # 1회로 유지하기 위해서다(2026-07-09 배포 실패 회고 — job이 늘면 실패 표면이 커진다).
-      # 러너 기본 Python에 기대지 않고 Lambda 런타임과 같은 3.13으로 고정한다 — 버전이 다르면
-      # 수집·문법 드리프트가 CI에서 안 잡힌다. 외부 의존성이 없어 install 단계가 없다
-      # (테스트는 fake client를 넘기므로 boto3를 import하지 않는다).
-      - uses: actions/setup-python@v5
+      # Helm 차트 검사(plan 0014). 별도 job으로 나누지 않는 이유는 러너 배정을 1회로 유지하기
+      # 위해서다(2026-07-09 배포 실패 회고 — job이 늘면 실패 표면이 커진다).
+      # 도구는 버전과 체크섬을 고정해 받는다.
+      - uses: azure/setup-helm@v4
         with:
-          python-version: "3.13"
+          version: v3.18.4
 
-      - name: Lambda handler 단위 테스트
-        working-directory: infra/prod/lambda/rotation_redeploy
-        run: python -m unittest discover -v
+      - name: kubeconform 설치
+        working-directory: .
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz
+          echo "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3  /tmp/kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
 
-      # Dockerfile smoke test: PR에서 배포와 동일한 arm64 크로스빌드가 x86에서 성공하는지 확인한다.
-      # deploy.yml이 x86 GA 러너 + buildx로 arm64를 크로스컴파일하므로(ADR 0001), 그 경로를 여기서
+      - name: Helm 차트 검사
+        working-directory: .
+        run: scripts/check-charts.sh
+
+      # Dockerfile smoke test: PR에서 배포와 동일한 멀티 아키텍처 크로스빌드가 x86에서 성공하는지 확인한다.
+      # deploy.yml이 x86 GA 러너 + buildx로 arm64·amd64를 크로스컴파일하므로(ADR 0001), 그 경로를 여기서
       # 미리 검증해 조용한 회귀를 막는다. --push/--load 없이 빌드만 해 성공 여부만 본다.
       # working-directory가 app이라 build context는 현재 디렉터리(.)이다.
       - name: buildx 준비
         if: github.event_name == 'pull_request'
         uses: docker/setup-buildx-action@v3
 
-      - name: Docker arm64 크로스빌드 검증
+      - name: Docker 멀티 아키텍처 크로스빌드 검증
         if: github.event_name == 'pull_request'
-        run: docker buildx build --platform linux/arm64 -t linkpulse-app:ci .
+        run: docker buildx build --platform linux/arm64,linux/amd64 -t linkpulse-app:ci .
