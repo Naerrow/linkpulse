@@ -1,0 +1,27 @@
+# ArgoCD가 git의 앱 차트를 클러스터에 맞춘다. 자동 동기화·selfHeal·prune을 켠다.
+# finalizer: Application을 지우면 ArgoCD가 앱 리소스(Deployment·Service 등)를 먼저 지운다.
+# 그래서 ArgoCD가 살아 있을 때 지워야 한다(scripts/full-destroy-prod.sh가 terraform보다 먼저 지운다).
+# 이미지는 Image Updater가 이 Application의 helm 파라미터(image.repository·image.tag)로 덮어쓴다(git에 쓰지 않는다).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: linkpulse
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: {{ .Values.repoURL | quote }}
+    targetRevision: {{ .Values.targetRevision | quote }}
+    path: {{ .Values.chartPath | quote }}
+    helm:
+      releaseName: linkpulse
+      valueFiles:
+        {{- toYaml .Values.valueFiles | nindent 8 }}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{ .Values.appNamespace | quote }}
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -1,6 +1,7 @@
 # P3 관측성 — CloudWatch 알람 + SNS(통지 팬아웃). Slack 배선은 chatbot.tf.
 # 감지 경로: CloudWatch Alarm -> SNS topic -> (AWS Chatbot) -> Slack.
-# data.aws_caller_identity.current 는 github_oidc.tf 에 이미 선언돼 있어 재사용한다(재선언 금지).
+# data.aws_caller_identity.current 는 iam.tf 에 선언돼 있어 재사용한다(재선언 금지).
+# 파드 CPU·파드 수 알람은 0015(Prometheus)에서 둔다. 가용성은 ALB 알람과 canary가 맡는다(plan 0014).
 # 임계값은 "초기값"이다 — 실트래픽을 보며 조정한다(ADR 0002 참고).
 
 locals {
@@ -158,72 +159,6 @@ resource "aws_cloudwatch_metric_alarm" "alb_no_healthy_hosts" {
   alarm_actions       = [aws_sns_topic.alarms.arn]
   ok_actions          = [aws_sns_topic.alarms.arn]
   tags                = { Name = "${local.name_prefix}-alb-no-healthy-hosts" }
-}
-
-# =====================================================================
-# ECS 알람 — CPU/Memory는 AWS/ECS(Insights 불필요), RunningTaskCount는 ECS/ContainerInsights.
-# =====================================================================
-
-resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
-  alarm_name        = "${local.name_prefix}-ecs-cpu-high"
-  alarm_description = "ECS service CPU utilization >= 80% for 3min"
-  namespace         = "AWS/ECS"
-  metric_name       = "CPUUtilization"
-  dimensions = {
-    ClusterName = aws_ecs_cluster.main.name
-    ServiceName = aws_ecs_service.app.name
-  }
-  statistic           = "Average"
-  period              = 60
-  evaluation_periods  = 3
-  threshold           = 80
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  treat_missing_data  = "missing"
-  alarm_actions       = [aws_sns_topic.alarms.arn]
-  ok_actions          = [aws_sns_topic.alarms.arn]
-  tags                = { Name = "${local.name_prefix}-ecs-cpu-high" }
-}
-
-resource "aws_cloudwatch_metric_alarm" "ecs_memory_high" {
-  alarm_name        = "${local.name_prefix}-ecs-memory-high"
-  alarm_description = "ECS service memory utilization >= 80% for 3min"
-  namespace         = "AWS/ECS"
-  metric_name       = "MemoryUtilization"
-  dimensions = {
-    ClusterName = aws_ecs_cluster.main.name
-    ServiceName = aws_ecs_service.app.name
-  }
-  statistic           = "Average"
-  period              = 60
-  evaluation_periods  = 3
-  threshold           = 80
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  treat_missing_data  = "missing"
-  alarm_actions       = [aws_sns_topic.alarms.arn]
-  ok_actions          = [aws_sns_topic.alarms.arn]
-  tags                = { Name = "${local.name_prefix}-ecs-memory-high" }
-}
-
-# 실행 태스크 수가 목표(desired)보다 적음. 임계값은 소스오브트루스(변수)를 직접 참조한다.
-# Container Insights 필요. 활성 직후 초기 공백은 INSUFFICIENT_DATA(정상).
-resource "aws_cloudwatch_metric_alarm" "ecs_running_tasks_low" {
-  alarm_name        = "${local.name_prefix}-ecs-running-tasks-low"
-  alarm_description = "ECS running task count below desired for 3min (needs Container Insights)"
-  namespace         = "ECS/ContainerInsights"
-  metric_name       = "RunningTaskCount"
-  dimensions = {
-    ClusterName = aws_ecs_cluster.main.name
-    ServiceName = aws_ecs_service.app.name
-  }
-  statistic           = "Average"
-  period              = 60
-  evaluation_periods  = 3
-  threshold           = var.service_desired_count
-  comparison_operator = "LessThanThreshold"
-  treat_missing_data  = "missing"
-  alarm_actions       = [aws_sns_topic.alarms.arn]
-  ok_actions          = [aws_sns_topic.alarms.arn]
-  tags                = { Name = "${local.name_prefix}-ecs-running-tasks-low" }
 }
 
 # =====================================================================

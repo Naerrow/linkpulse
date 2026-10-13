@@ -1,0 +1,5 @@
+apiVersion: v2
+name: gitops
+description: linkpulse ArgoCD Application과 Image Updater 설정. infra/k8s가 helm_release로 넣는다(plan 0014).
+type: application
+version: 0.1.0

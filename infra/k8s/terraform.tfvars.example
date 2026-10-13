@@ -1,0 +1,10 @@
+# `terraform.tfvars`로 복사해 채운다(실제 tfvars는 .gitignore). 기본값으로도 동작한다.
+
+# 관리자 토큰의 SHA-256 해시(plan 0011). 원문은 여기에도 어디에도 두지 않는다 — 사람만 보관한다.
+#   토큰은 외울 수 있는 8자 이상의 비밀번호(영문·숫자·기호, 단어 사이는 -). 한글은 브라우저가 헤더에 못 싣는다.
+#   read -rs "TOKEN?토큰: "; echo; printf %s "$TOKEN" | shasum -a 256 | cut -d" " -f1; unset TOKEN
+# plan 0014 전에는 infra/prod/terraform.tfvars에 있었다. 그 줄을 이 파일로 옮긴다(docs/runbooks/alarm-response.md).
+# admin_token_sha256 = "<위 명령의 출력 64자>"
+
+# 레이트리밋 예외(한계 측정 때만)는 여기에 쓰지 않는다. 측정 apply의 -var로만 준다:
+#   terraform apply -var "rate_limit_exempt_ips=$MYIP"

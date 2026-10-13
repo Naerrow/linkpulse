@@ -1,0 +1,5 @@
+apiVersion: v2
+name: site-aws
+description: linkpulse AWS 사이트 값(ConfigMap·Secret)과 기존 타깃 그룹 연결(TargetGroupBinding). infra/k8s가 helm_release로 넣는다(plan 0014).
+type: application
+version: 0.1.0
