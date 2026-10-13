@@ -107,63 +107,86 @@ unset ADMIN_TOKEN; docker compose down
 
 ### 운영 측정 [사람]
 
-측정 창은 2시간 안쪽이다(plan 0012 단계 6). 집 IP는 화면·로그·문서 어디에도 찍지 않는다.
+측정 창은 2시간 30분 안쪽이다(plan 0014 단계 9 — EKS. 0012·0013의 ECS 절차는 git 이력에 있다). 집 IP는 화면·로그·문서 어디에도 찍지 않는다.
 명령 블록에는 주석을 넣지 않았다 — zsh 대화형 셸은 `#`을 인자로 넘긴다(ops-gotchas G-3). 설명은 블록 밖에 둔다.
-모든 블록은 저장소 루트에서, **main을 받아 둔 상태**로 실행한다(측정 코드와 tf 변수가 main에 있어야 한다).
+모든 블록은 저장소 루트에서, **main을 받아 둔 상태**로 실행한다(측정 코드·차트·tf 변수가 main에 있어야 한다).
 
-**1) 인프라 켜기(main 이미지).** 스크립트가 확인 문구를 두 번 묻고, 중간에 배포 성공을 기다린다.
-
-```bash
-./scripts/full-apply-prod.sh --trigger-deploy
-```
-
-**2) 측정 예외 + SMS 끄기, 그리고 새 태스크 정의를 서비스에 반영.** IP가 비면 apply까지 가지 않는다.
-apply는 태스크 정의 revision만 새로 등록한다(서비스는 `ignore_changes`). 배포 워크플로가 그 revision을 기준으로 실제 이미지를 띄운다.
+**1) 인프라 켜기(GHCR `main` 이미지).** 스크립트가 확인 문구를 두 번 묻고, ArgoCD 동기화·롤아웃·헬스체크까지 기다린다.
 
 ```bash
-MYIP=$(curl -fsS https://checkip.amazonaws.com) && [[ -n "$MYIP" ]] && terraform -chdir=infra/prod apply -var=ecr_force_delete=false -var "rate_limit_exempt_ips=$MYIP" -var "alarm_sms_number="
-gh auth switch --user Naerrow && gh workflow run deploy.yml --ref main
+./scripts/full-apply-prod.sh
 ```
 
-배포 워크플로가 성공할 때까지 기다린다(`gh run watch` 또는 Actions 화면).
-
-**3) 확인.** IP가 아니라 개수만 찍힌다. 1)의 태스크는 0, 2)의 배포 뒤 태스크는 1이어야 한다.
-`container_definitions`가 sensitive라 plan에서는 env 차이가 가려진다 — 이 기동 로그가 실제 확인이다.
+**1-1) 노드 확인(plan 0014 9-1).** 노드 2대의 요청 합이 할당 가능량 안인지, t4g 크레딧이 `unlimited`인지 본다(`standard`면 측정하지 않는다).
 
 ```bash
-aws logs tail /ecs/linkpulse-prod-app --since 30m --region ap-northeast-2 | grep -E 'rate_limit_exempt_count|"db pool"' | tail -6
+kubectl describe nodes | grep -A8 'Allocated resources'
+aws ec2 describe-instance-credit-specifications --region ap-northeast-2 --instance-ids $(aws ec2 describe-instances --region ap-northeast-2 --filters Name=tag:eks:cluster-name,Values=linkpulse-prod-eks Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text) --query 'InstanceCreditSpecifications[].CpuCredits'
 ```
 
-**3-1) 클릭 파이프라인 스모크(plan 0013부터).** 링크 하나에 리다이렉트 3번 → 5초 뒤 통계의 클릭이 3이어야 한다.
-`302 302 302`와 `3`이 아니면 측정하지 않고 멈춘다(큐·IAM·워커 중 하나가 막혔다 — `alarm-response.md` §14).
+**2) 측정 예외 + SMS 끄기.** IP가 비면 apply까지 가지 않는다. 예외 IP는 `infra/k8s`의 사이트 Secret으로 들어간다.
+envFrom은 Secret 변경을 다시 읽지 않으므로 파드를 다시 띄운다.
+
+```bash
+MYIP=$(curl -fsS https://checkip.amazonaws.com) && [[ -n "$MYIP" ]] && terraform -chdir=infra/k8s apply -var "rate_limit_exempt_ips=$MYIP" && terraform -chdir=infra/prod apply -var "alarm_sms_number=" && kubectl -n linkpulse rollout restart deploy/linkpulse && kubectl -n linkpulse rollout status deploy/linkpulse
+```
+
+**3) 확인.** IP가 아니라 개수만 찍힌다. 다시 띄운 파드는 `rate_limit_exempt_count`가 1이어야 한다.
+`set_sensitive`라 plan에서는 값이 가려진다 — 이 기동 로그가 실제 확인이다.
+
+```bash
+kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --prefix --tail=200 | grep -E 'rate_limit_exempt_count|"db pool"' | tail -6
+```
+
+**3-1) 클릭 파이프라인 스모크 + 로그 필드 확인.** 링크 하나에 리다이렉트 3번 → 5초 뒤 통계의 클릭이 3이어야 한다.
+그리고 Fluent Bit가 앱 JSON을 최상위 필드로 풀었는지 Logs Insights로 본다 — 결과에 `pods`(파드 수)가 숫자로 나와야 한다.
+`302 302 302`·`3`·`pods` 숫자가 아니면 측정하지 않고 멈춘다(큐·IAM·워커·로그 중 하나가 막혔다 — `alarm-response.md` §14).
+마지막 줄은 Fluent Bit의 재시도·일시정지·유실·오류 줄 수다. 0이 아니면 `grep -iE` 로 그 줄을 직접 본다 — 수집 표의 정합성·풀 통계는 앱 로그에 기대서, 로그가 빠지면 클릭이 아니라 로그가 빠진 것인데도 불일치로 보인다.
 
 ```bash
 read -rs "ADMIN_TOKEN?관리자 토큰: "; echo
 C=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"url":"https://example.com/smoke"}' https://lpulse.live/api/links | jq -r .code); echo "code=$C"
 for i in 1 2 3; do curl -s -o /dev/null -w '%{http_code} ' https://lpulse.live/$C; done; echo
 sleep 5; curl -s https://lpulse.live/api/links/$C | jq .clicks
-aws logs tail /ecs/linkpulse-prod-app --since 2m --region ap-northeast-2 | grep '"click queue"' | tail -2
+Q=$(aws logs start-query --region ap-northeast-2 --log-group-name /eks/linkpulse-prod/app --start-time $(( $(date +%s) - 600 )) --end-time $(date +%s) --query-string 'filter msg = "db pool" | stats max(in_use) as in_use_max, count_distinct(task_id) as pods' --query queryId --output text); sleep 8; aws logs get-query-results --region ap-northeast-2 --query-id "$Q" --query results
+kubectl -n logging logs -l app.kubernetes.io/name=fluent-bit --tail=-1 | grep -ciE 'retry|paused|drop|error'
 ```
 
-**4)·5) 시나리오 3개를 차례로 실행하고 수집한다.** 한 셸에서 블록 전체를 붙여 넣는다. 0012(1600까지)는 약 75분, 0013(3200까지)은 약 85분이다.
-- 첫 줄의 `P`(파일 이름에 붙는 plan 번호)와 `M`(`MAX_RPS`)을 그 측정에 맞춘다. 0012는 `P=0012; M=1600`이었다.
+**3-2) 회전 드릴(plan 0014 9-3).** Step 1(자동 재배포)을 지운 근거를 EKS에서 확인한다. 온디맨드 회전을 걸고 `/readyz`를 5초마다 찍는다.
+**503이 2분 안에 스스로 200으로 돌아오면 통과**, 아니면 측정하지 않고 멈춘다(`alarm-response.md` §13 "비밀번호 로테이션 직후라면"으로 복구).
+회전은 몇 분 뒤에 시작될 수 있다 — 5분 동안 본다. 결과(503 구간 시각)를 0014 결과 문서에 적는다.
+
+```bash
+S=$(aws rds describe-db-instances --region ap-northeast-2 --db-instance-identifier linkpulse-prod-pg --query 'DBInstances[0].MasterUserSecret.SecretArn' --output text) && aws secretsmanager rotate-secret --region ap-northeast-2 --secret-id "$S" --query VersionId --output text
+for i in $(seq 60); do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 https://lpulse.live/readyz)"; sleep 5; done
+kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --prefix --since=10m | grep -E 'auth_failed_observed|secret_refreshed|credential_recovered|secret_refresh_failed'
+```
+
+**4)·5) 시나리오 3개를 한 창에서 차례로 실행하고 수집한다.** 한 셸에서 블록 전체를 붙여 넣는다. 6400까지 8단계라 실행마다 24분, 셋에 약 1시간 45분이다.
+- **실행마다 파드 2개에서 시작한다.** HPA 축소 안정화가 5분이라, 직전 실행이 늘린 파드가 2개로 줄 때까지 기다린다.
+- 실행 동안 `record-pods.sh`가 파드 CPU·HPA를 30초마다 CSV 옆(`-pods.tsv`·`-hpa.tsv`)에 적는다. 수집이 그 파일을 읽어 "파드·HPA" 절을 붙인다.
+- 수집의 넷째 인자는 로그 그룹이다(EKS: `/eks/linkpulse-prod/app`).
 - 토큰이 운영에서 통하는지(`200`) 먼저 확인하고, 통할 때만 돈다. 401이면 비밀번호 입력 실수다(한/영 확인).
-- 실행이 끝나면 3분 기다렸다가 수집한다(지표·로그가 늦게 들어온다). 그다음 2분 더 쉬어 지표 구간을 나눈다.
+- 실행이 끝나면 3분 기다렸다가 수집한다(지표·로그가 늦게 들어온다).
 - setup이 실패하면(시작 epoch 줄이 없으면) 거기서 멈춘다. 대개 예외 IP가 안 맞아 링크 생성이 429로 막힌 것이다.
 - `ulimit -n 10240`: macOS 기본 256개로는 VU 500개의 연결을 못 연다. 그러면 발생기 오류가 서버 한계처럼 보인다.
 - 명령은 절대경로로 써서 어느 디렉터리에서 붙여 넣어도 된다(ops-gotchas G-13).
 
 ```bash
 ulimit -n 10240
-P=0013; M=3200; R=/Users/parkjaehee/mini-project/linkpulse/load/k6
+P=0014; M=6400; R=/Users/parkjaehee/mini-project/linkpulse/load/k6; LG=/eks/linkpulse-prod/app
 read -rs "ADMIN_TOKEN?관리자 토큰: "; echo
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN_TOKEN" https://lpulse.live/api/admin/links); echo "토큰 확인: $CODE"
 [[ $CODE == 200 ]] && for S in spread hot read; do
+  until [[ "$(kubectl -n linkpulse get hpa linkpulse -o jsonpath='{.status.currentReplicas}')" == 2 ]]; do echo "파드 2개로 줄기를 기다린다"; sleep 30; done
+  echo "$S 시작 파드 수 2 ($(date -u +%H:%M:%S))"
+  $R/record-pods.sh $R/results/raw/$P-$S & REC=$!
   ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e SCENARIO=$S -e MAX_RPS=$M --out csv=$R/results/raw/$P-$S.csv.gz $R/capacity.js 2>&1 | tee $R/results/raw/$P-$S.log
-  grep -q 'epoch=' $R/results/raw/$P-$S.log || { echo "$S setup 실패 — 멈춘다"; break; }
+  grep -q 'epoch=' $R/results/raw/$P-$S.log || { kill $REC; echo "$S setup 실패 — 멈춘다"; break; }
   sleep 180
-  $R/collect-metrics.sh "$(grep -o 'epoch=[0-9]*' $R/results/raw/$P-$S.log | cut -d= -f2)" $R/results/raw/$P-$S.csv.gz $M > $R/results/raw/$P-$S-metrics.md && echo "$S 수집 완료"
-  sleep 120
+  kill $REC
+  echo "$S Fluent Bit 경고 $(kubectl -n logging logs -l app.kubernetes.io/name=fluent-bit --tail=-1 | grep -ciE 'retry|paused|drop|error')건"
+  $R/collect-metrics.sh "$(grep -o 'epoch=[0-9]*' $R/results/raw/$P-$S.log | cut -d= -f2)" $R/results/raw/$P-$S.csv.gz $M $LG > $R/results/raw/$P-$S-metrics.md && echo "$S 수집 완료"
 done
 unset ADMIN_TOKEN MYIP
 ```
@@ -172,7 +195,7 @@ unset ADMIN_TOKEN MYIP
 1600 rps면 k6가 CSV를 초당 약 2만 행 gzip으로 쓴다. 발생기가 포화하면 CSV 출력이 첫 용의자다.
 
 ```bash
-L=/Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0013-cpu.log; sysctl -n hw.ncpu > $L; while true; do printf '%s %s %s\n' "$(date -u +%s)" "$(top -l 2 -n 0 -s 1 | awk '/CPU usage/ {u=$3; s=$5} END {print u+s}')" "$(ps -A -o %cpu=,comm= | awk '$2 ~ /k6$/ {s+=$1} END {print s+0}')" >> $L; sleep 8; done
+L=/Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0014-cpu.log; sysctl -n hw.ncpu > $L; while true; do printf '%s %s %s\n' "$(date -u +%s)" "$(top -l 2 -n 0 -s 1 | awk '/CPU usage/ {u=$3; s=$5} END {print u+s}')" "$(ps -A -o %cpu=,comm= | awk '$2 ~ /k6$/ {s+=$1} END {print s+0}')" >> $L; sleep 8; done
 ```
 
 **6) 끄기.** 수집이 다 끝난 뒤에 한다(destroy하면 로그 그룹이 지워진다). `Destroy complete!`까지 컴퓨터를 끄지 않는다(ops-gotchas G-9).
@@ -182,7 +205,8 @@ L=/Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0013-cpu.log; sys
 ```
 
 실행마다 남는 것: `load/k6/results/raw/<P>-<시나리오>.log`(k6 요약·`DB 클릭 합계`), `.csv.gz`, `-metrics.md`(수집 표),
-`-cw.json`·`-pool.json`·`-fail.json`·`-cq.json`·`-cons.json`(AWS 원본 응답 — destroy 뒤에도 표를 다시 만들 수 있다).
+`-cw.json`·`-pool.json`·`-fail.json`·`-cq.json`·`-cons.json`(AWS 원본 응답 — destroy 뒤에도 표를 다시 만들 수 있다),
+`-pods.tsv`·`-hpa.tsv`(EKS, 파드 CPU·HPA 30초 기록).
 
 클릭 정합성:
 - **0012(동기 집계):** "302 수 > DB 합계"일 때만 유실로 본다. abort로 끝난 실행은 진행 중 요청이 끊겨 DB 합계가 더 클 수 있다.

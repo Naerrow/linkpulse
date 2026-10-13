@@ -1,5 +1,10 @@
 # chaos-healthz — GameDay 장애 주입 이미지
 
+> 🔁 **plan 0014(2026-10) 이후**: `deploy.yml`에 `image_tag` 입력이 없고 ECS 서킷브레이커도 없다. EKS에서 같은 주입은
+> ArgoCD Application에 이 이미지를 고정해서 한다([alarm-response.md](../../docs/runbooks/alarm-response.md) R-1 ①②, 이미지는 GHCR에 다시 올려야 한다).
+> 그때 기대 동작은 "자동 롤백"이 아니라 **롤링이 멈추고 옛 파드가 남는 것**이다(readiness gate + surge 1·unavailable 0).
+
+
 P3-2 GameDay(S1)에서 **자동 방어(deployment circuit breaker 롤백)를 실증**하기 위한 이미지.
 계획·예측표: [`docs/plans/0003-p3-2-fault-injection.md`](../../docs/plans/0003-p3-2-fault-injection.md) / 기록지: [`docs/postmortems/2026-07-06-gameday-01.md`](../../docs/postmortems/2026-07-06-gameday-01.md)
 

@@ -1,5 +1,9 @@
 # Runbook — RDS 백업 복원 검증(PITR·스냅샷) / 복원 가능성 리허설
 
+> 🔁 **plan 0014(2026-10) 이후 이 드릴은 그대로 돌지 않는다.** 복원본 검증을 ECS 일회용 태스크(`register-task-definition`·`run-task`)로 했는데,
+> ECS 클러스터가 없어졌다. 다음 리허설 때 같은 검증을 쿠버네티스 일회용 파드(`kubectl run`)로 옮기는 plan을 연다. 아래 본문은 ECS 시절(P4) 절차·기록이다.
+
+
 운영 DB `linkpulse-prod-pg`의 백업에서 **격리된 별도 인스턴스로 복원**해 데이터가 조회되는지와 복원 지점을 검증한 뒤 **드릴 리소스를 전량 정리**하는 절차다. 이 문서는 **백업 복원 가능성·DB 검증 소요시간을 측정하는 드릴**이며, 손상된 운영 데이터의 역복사, 쓰기 동결, 복원본 cutover, 애플리케이션 헬스 확인, 롤백, Terraform 상태 정합을 수행하지 않는다. 따라서 **사고 복구 런북도 서비스 RTO 측정 절차도 아니다.**
 
 - 관련: [ADR 0005 — 백업·복원 검증 태세](../adr/0005-backup-restore-dr.md) · plan [`0007-p4-rds-restore-drill`](../plans/0007-p4-rds-restore-drill/plan.md) · 알람 대응은 [alarm-response.md](alarm-response.md)가 단일 소스다(이 문서는 **알람 대응 절차가 아니다**)

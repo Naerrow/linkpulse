@@ -353,3 +353,22 @@ while>
 
 **재발 방지** — 건네는 명령은 한 줄·절대경로로 쓴다(G-3의 "상대 경로 `cd`를 블록에 넣지 않는다"와 같은 원칙).
 붙여 넣은 뒤 `while>`·`quote>` 같은 이어쓰기 프롬프트가 보이면 실행되지 않은 것이다.
+
+---
+
+## G-14. 차트 스키마 검사가 CR의 모르는 필드·오타를 통과시켰다
+
+**증상** — plan 0014 차트 검사(`scripts/check-charts.sh`)를 만들며 변이 검사를 했다(2026-10-13). 두 가지가 나왔다.
+1. CRDs-catalog의 `ImageUpdater` 스키마로 검사하자 올바른 CR이 실패했다.
+   ```
+   ImageUpdater linkpulse is invalid: ... at '/spec': missing property 'namespace'
+   ```
+2. 거꾸로, 고정 버전 CRD에서 뽑은 스키마로 바꾸자 `spec`에 없는 필드(`namespace`)나 오타(`manifestTarget`)를 넣어도 **통과했다.**
+
+**원인**
+1. 카탈로그 스키마가 옛 Image Updater 버전 것이었다. 고정한 차트(1.3.2)의 CRD에는 `spec.namespace`가 아예 없다.
+2. CRD의 `openAPIV3Schema`에는 `additionalProperties: false`가 없다. API 서버도 모르는 필드를 오류 없이 **버린다** — 오타가 클러스터에서도 조용히 무시된다.
+
+**해결** — `ImageUpdater` 스키마는 고정 버전 CRD에서 만들어 저장소에 둔다(`scripts/schemas/`). 만들 때 properties가 있는 모든 객체에 `additionalProperties: false`를 넣는다(`scripts/schemas/crd-to-jsonschema.py`). TGB·Application은 카탈로그 스키마가 이미 모르는 필드를 거부해서 그대로 쓴다(오타 변이로 확인).
+
+**재발 방지** — 스키마 검사를 새로 붙이면 **틀린 입력(모르는 필드·오타)으로 실패하는지 먼저 본다.** 통과만 보면 검사가 아무것도 막지 않는 것을 모른다. 차트 버전을 올리면 그 버전의 CRD로 스키마를 다시 만든다(`check-charts.sh` 머리 주석).

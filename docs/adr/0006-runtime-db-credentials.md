@@ -1,6 +1,7 @@
 # ADR 0006 — DB 비밀번호를 런타임에 다시 읽는다 (회전 저항성)
 
 - 상태: 채택 (2026-10-06, plan 0009 Step 2). **라이브 전** — 2-5 배포·2-6 실전 검증이 남아 있다.
+  **plan 0014(2026-10-13)**: EKS로 옮기며 seed를 ECS 주입 대신 앱이 기동 때 직접 읽는다(`DB_PASSWORD_SOURCE=aws|file`), Step 1 Lambda는 지웠다([ADR 0007](0007-ecs-to-eks.md)).
 - 관련: AGENTS.md 가드레일 #2(비밀값은 Secrets Manager/환경변수로만), Phase P4(d)-2,
   [plan 0009](../plans/0009-p4d2-rotation-resilience/plan.md),
   회고 [2026-08-16](../postmortems/2026-08-16-db-password-rotation-outage.md) ·
