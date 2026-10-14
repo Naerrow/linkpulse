@@ -141,7 +141,8 @@ echo
 if [[ "$CLUSTER_EXISTS" != "true" ]]; then
   echo "Step 1/3: EKS cluster $CLUSTER_NAME not found; skipping in-cluster cleanup."
 elif [[ "$PLAN_ONLY" == "true" ]]; then
-  echo "Step 1/3: plan-only - would delete Application linkpulse and TargetGroupBinding(s) first."
+  echo "Step 1/3: plan-only - would delete Application linkpulse and TargetGroupBinding(s) first,"
+  echo "          and Prometheus/Alertmanager CRs too if they carry finalizers."
 else
   echo "Step 1/3: delete finalizer-bearing objects while their controllers are alive."
   # Application(resources-finalizer)은 ArgoCD가, TGB는 LB 컨트롤러가 살아 있어야 지워진다. terraform destroy가
@@ -158,6 +159,24 @@ else
     exit 1
   fi
   echo "OK: no Application / TargetGroupBinding left."
+  # plan 0015: Prometheus·Alertmanager CR에 finalizer가 있으면 operator가 살아 있을 때 지운다. 고정 버전(operator v0.94.1)은
+  # 기본으로 넣지 않는 것으로 보지만, 들어가 있으면 helm uninstall이 operator와 CR을 함께 지울 때 CR이 남아 네임스페이스 삭제가 멈춘다.
+  # 없으면 아무것도 하지 않는다(흐름은 그대로다).
+  if kubectl api-resources --api-group=monitoring.coreos.com -o name 2>/dev/null | grep -qx 'prometheuses.monitoring.coreos.com'; then
+    MON_KINDS="prometheuses.monitoring.coreos.com,alertmanagers.monitoring.coreos.com"
+    FIN_CRS="$(kubectl -n monitoring get "$MON_KINDS" -o jsonpath='{range .items[?(@.metadata.finalizers)]}{.kind}/{.metadata.name}{" "}{end}' 2>/dev/null || true)"
+    if [[ -n "$FIN_CRS" ]]; then
+      echo "Monitoring CRs with finalizers: $FIN_CRS- deleting while the operator is alive."
+      kubectl -n monitoring delete "$MON_KINDS" --all --ignore-not-found --wait --timeout=5m
+      if [[ -n "$(kubectl -n monitoring get "$MON_KINDS" -o name 2>/dev/null || true)" ]]; then
+        echo "Monitoring CRs remain; refusing to destroy the operator under them." >&2
+        echo "See docs/runbooks/alarm-response.md (EKS: stuck finalizer)." >&2
+        exit 1
+      fi
+    else
+      echo "OK: no finalizer on Prometheus / Alertmanager CRs."
+    fi
+  fi
 fi
 
 echo

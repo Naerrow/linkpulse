@@ -12,7 +12,8 @@ Flow:
   0. preflight: the app image ghcr.io/naerrow/linkpulse:main exists and is public
   1. infra/prod  terraform apply (VPC, RDS, ALB, SQS, EKS cluster + nodes + add-ons, IAM)
   2. kubeconfig  aws eks update-kubeconfig
-  3. infra/k8s   terraform apply (LB controller, ArgoCD, Image Updater, Fluent Bit, site values, Application)
+  3. infra/k8s   terraform apply (kube-prometheus-stack, LB controller, ArgoCD, Image Updater, Fluent Bit,
+                 site values, Application)
   4. wait        ArgoCD sync -> Deployment rollout -> target group healthy
   5. check       https://<domain>/healthz
 
