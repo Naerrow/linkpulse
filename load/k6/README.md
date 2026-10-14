@@ -138,7 +138,8 @@ MYIP=$(curl -fsS https://checkip.amazonaws.com) && [[ -n "$MYIP" ]] && terraform
 kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --prefix --tail=200 | grep -E 'rate_limit_exempt_count|"db pool"' | tail -6
 ```
 
-**3-1) 클릭 파이프라인 스모크 + 로그 필드 확인.** 링크 하나에 리다이렉트 3번 → 5초 뒤 통계의 클릭이 3이어야 한다.
+**3-1) 클릭 파이프라인 스모크 + 로그 필드 확인.** 링크 하나에 리다이렉트 3번 → 15초 뒤 통계의 클릭이 3이어야 한다.
+EKS 첫 측정 창(2026-10-13)에서 5초 뒤에는 2였고 곧 3이 됐다 — 배치가 다른 파드의 워커에서 몇 초 늦게 반영될 수 있다.
 그리고 Fluent Bit가 앱 JSON을 최상위 필드로 풀었는지 Logs Insights로 본다 — 결과에 `pods`(파드 수)가 숫자로 나와야 한다.
 `302 302 302`·`3`·`pods` 숫자가 아니면 측정하지 않고 멈춘다(큐·IAM·워커·로그 중 하나가 막혔다 — `alarm-response.md` §14).
 마지막 줄은 Fluent Bit의 재시도·일시정지·유실·오류 줄 수다. 0이 아니면 `grep -iE` 로 그 줄을 직접 본다 — 수집 표의 정합성·풀 통계는 앱 로그에 기대서, 로그가 빠지면 클릭이 아니라 로그가 빠진 것인데도 불일치로 보인다.
@@ -147,7 +148,7 @@ kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --prefix --tail=20
 read -rs "ADMIN_TOKEN?관리자 토큰: "; echo
 C=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"url":"https://example.com/smoke"}' https://lpulse.live/api/links | jq -r .code); echo "code=$C"
 for i in 1 2 3; do curl -s -o /dev/null -w '%{http_code} ' https://lpulse.live/$C; done; echo
-sleep 5; curl -s https://lpulse.live/api/links/$C | jq .clicks
+sleep 15; curl -s https://lpulse.live/api/links/$C | jq .clicks
 Q=$(aws logs start-query --region ap-northeast-2 --log-group-name /eks/linkpulse-prod/app --start-time $(( $(date +%s) - 600 )) --end-time $(date +%s) --query-string 'filter msg = "db pool" | stats max(in_use) as in_use_max, count_distinct(task_id) as pods' --query queryId --output text); sleep 8; aws logs get-query-results --region ap-northeast-2 --query-id "$Q" --query results
 kubectl -n logging logs -l app.kubernetes.io/name=fluent-bit --tail=-1 | grep -ciE 'retry|paused|drop|error'
 ```

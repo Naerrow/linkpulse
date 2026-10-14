@@ -372,3 +372,27 @@ while>
 **해결** — `ImageUpdater` 스키마는 고정 버전 CRD에서 만들어 저장소에 둔다(`scripts/schemas/`). 만들 때 properties가 있는 모든 객체에 `additionalProperties: false`를 넣는다(`scripts/schemas/crd-to-jsonschema.py`). TGB·Application은 카탈로그 스키마가 이미 모르는 필드를 거부해서 그대로 쓴다(오타 변이로 확인).
 
 **재발 방지** — 스키마 검사를 새로 붙이면 **틀린 입력(모르는 필드·오타)으로 실패하는지 먼저 본다.** 통과만 보면 검사가 아무것도 막지 않는 것을 모른다. 차트 버전을 올리면 그 버전의 CRD로 스키마를 다시 만든다(`check-charts.sh` 머리 주석).
+
+## G-15. 고부하에서 파드 하나의 앱 로그가 2분 동안 통째로 빠졌다 — 정합성이 틀린 것처럼 보였다
+
+**증상** — plan 0014 `hot` 6400 rps(2026-10-13 06:43~06:44 UTC). `collect-metrics.sh`의 정합성 절이 이렇게 나왔다.
+```
+recorded 2083594 − dropped 0 = 2083594
+applied 2087746 + unknown 0 = 2087746
+DB 합계(teardown) = 2189636
+```
+세 값이 다 달라 클릭이 사라진 것처럼 보였다. 하지만 DB 합계는 k6의 `redirects_302`(2,189,634)와 맞았다. 분 단위로 k6 요청 수와 로그 `recorded_clicks`를 비교했다. 06:43에 53,395건, 06:44에 63,590건이 빠졌다 — 파드 6개 중 **하나의 몫**(06:44 요청 ÷ 6 = 63,704)이다. 06:45부터는 맞았다. 그 창의 로그 레코드 수도 요청 수보다 약 10만 적었다. 같은 6400의 `spread`·`read`는 빠지지 않았다.
+
+**원인** — 클릭이 아니라 **로그가 빠졌다.** 그 파드는 초당 약 1,060줄을 썼다. Fluent Bit tail 입력은 `Mem_Buf_Limit 5MB`, 메모리 버퍼만 쓰고, 읽은 위치를 저장하는 DB가 없다.
+증거(`load/k6/results/raw/0014-fluentbit.txt`, 측정 직후 수집)는 이렇다.
+- Fluent Bit 두 개 모두 **재시작 0회**다. 재시작해서 파일 끝부터 다시 읽었다는 가설은 빠진다.
+- 6400 부하에서 두 노드의 tail 입력이 **초마다 `paused (mem buf overlimit)` → `resume`을 반복했다.** 남은 마지막 40줄이 `read` 6400의 끝(07:15~07:16)이다. 06:43 당시의 줄은 남지 않았다.
+- kubelet은 컨테이너 로그를 **10Mi마다 회전**하고 5개까지 둔다(`containerLogMaxSize`·`containerLogMaxFiles`). 6400에서는 파드당 약 10초마다 회전한다. 같은 로그에 `handle rotation()` 줄이 있다.
+
+입력이 멈춘 사이 파일이 회전되면, Fluent Bit는 회전된 파일을 `Rotate_Wait`(기본 5초) 동안만 더 읽는다. 그 안에 다 읽지 못하면 남은 부분을 놓친다. 06:43의 한 파드가 이렇게 빠진 것으로 본다.
+
+**해결** — 측정 판정은 DB 합계와 `302 ≤ DB ≤ 302 + 실패 요청`으로 했다(`0014-eks.md`). 로그로 계산한 열은 그 두 분 동안 약 1/6 적게 잡혔다고 문서에 적었다.
+
+**재발 방지** — **로그 합계로 정합성을 판정하는 방식은 고부하에서 믿지 않는다.** 불일치가 나면 먼저 DB 합계와 k6 302 수를 비교하고, 분 단위로 k6 요청 수 대 로그 수를 비교해 로그 유실인지 가른다.
+0015에서 클릭 통계를 지표 카운터(Prometheus)로 옮긴다. Fluent Bit는 `storage.type filesystem` 버퍼·tail DB·`Rotate_Wait` 연장 중에서 고른다.
+측정 중에는 `kubectl -n logging logs -l app.kubernetes.io/name=fluent-bit | grep -ciE 'retry|paused|drop|error'`가 0이 아니면 그 줄을 바로 본다(README 3-1).
