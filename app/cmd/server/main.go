@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,6 +24,7 @@ import (
 	"github.com/Naerrow/linkpulse/app/internal/dbcreds"
 	"github.com/Naerrow/linkpulse/app/internal/httpapi"
 	"github.com/Naerrow/linkpulse/app/internal/links"
+	"github.com/Naerrow/linkpulse/app/internal/metrics"
 )
 
 // shutdownTimeout은 종료 시 진행 중 요청을 기다려 주는 최대 시간이다.
@@ -50,8 +52,15 @@ const (
 	readTimeout = 10 * time.Second
 	// 응답 쓰기 상한. 레디니스 DB 핑 상한(1s, health.go)과 여유를 둔 값.
 	writeTimeout = 15 * time.Second
-	// keep-alive 유휴 연결 상한.
-	idleTimeout = 60 * time.Second
+	// keep-alive 유휴 연결 상한. ALB 유휴 타임아웃(60초, aws_lb 기본값)보다 길어야 한다(plan 0015).
+	// 같거나 짧으면 서버가 막 닫는 연결에 ALB가 요청을 실어 502가 날 수 있다 — AWS는 대상의 keep-alive를
+	// 로드 밸런서 유휴 타임아웃보다 길게 두라고 권한다(ELB 사용자 가이드 "Connection idle timeout").
+	idleTimeout = 75 * time.Second
+	// albIdleTimeout은 위 관계를 테스트로 고정하려고 둔 ALB 쪽 값이다. aws_lb idle_timeout을 바꾸면 같이 바꾼다.
+	albIdleTimeout = 60 * time.Second
+	// 내부 포트(/metrics·pprof)의 응답 쓰기 상한. pprof는 seconds가 WriteTimeout보다 긴 프로파일 요청을 거부하므로
+	// 30초 프로파일(plan 0015 실험 E2)보다 길게 둔다.
+	metricsWriteTimeout = 60 * time.Second
 )
 
 func main() {
@@ -65,6 +74,9 @@ func main() {
 	// task_id를 모든 구조화 로그에 고정 첨부한다. 2-6이 "회전 전에 기록한 task ID 집합"으로
 	// 판정하므로 이 필드가 없으면 판정이 불가능하다. 실패하면 unknown으로 두고 기동은 계속한다.
 	setupLogger(cfg.LogLevel, dbcreds.TaskID(context.Background()))
+
+	// 지표(plan 0015). 내부 포트에서만 낸다 — 아래 newMetricsServer.
+	m := metrics.New()
 
 	// 저장소 → 서비스 → 라우터 순으로 의존성을 조립한다.
 	// DATABASE_URL이 있으면 Postgres를, 없으면 인메모리(재시작 시 데이터 소실)를 쓴다.
@@ -106,6 +118,7 @@ func main() {
 		statsCtx, stopStats := context.WithCancel(context.Background())
 		defer stopStats()
 		go db.LogPoolStats(statsCtx, pool, poolStatsInterval)
+		m.RegisterDB(pool)
 		repo = links.NewPostgresRepository(pool)
 		// readyz가 실제 DB 연결 상태를 반영하도록 핑 함수를 주입한다.
 		readiness = func(ctx context.Context) error { return pool.PingContext(ctx) }
@@ -118,6 +131,7 @@ func main() {
 	clickStats := &clicks.Stats{}
 	batcher := clicks.NewBatcher(clickQueue, clickStats)
 	worker := clicks.NewWorker(clickQueue, repo, clickStats)
+	m.RegisterClicks(clickStats, batcher.PendingCodes)
 	linkSvc := links.NewService(repo, cfg.ShortCodeLength, batcher)
 	// 같은 저장소가 요청도 맡는다 — 승인이 링크와 요청을 한 트랜잭션으로 바꿔야 해서다.
 	reqSvc := links.NewRequestService(repo, cfg.ShortCodeLength)
@@ -133,8 +147,10 @@ func main() {
 		Readiness:        readiness,
 		// 예외 IP 외의 한도 필드는 zero-value → 운영 기본값 적용(httpapi/ratelimit.go의 default* 상수).
 		RateLimit: httpapi.RateLimitConfig{ExemptIPs: cfg.RateLimitExemptIPs},
+		Observer:  m,
 	})
-	srv := newServer(cfg, handler)
+	srv := newServer(cfg, handler, m.ConnState)
+	metricsSrv := newMetricsServer(cfg.MetricsAddr, m.Handler())
 
 	// 클릭 파이프라인. 종료는 drainClicks가 HTTP 종료 뒤에 맡는다.
 	clickCtx, stopClicks := context.WithCancel(context.Background())
@@ -159,11 +175,19 @@ func main() {
 	}()
 	drain := func() { drainClicks(stopClicks, batcher, finalFlushTimeout, workerDone, statsDone) }
 
-	// 서버를 고루틴에서 띄우고, 리슨 실패는 채널로 전달한다.
-	serverErr := make(chan error, 1)
+	// 서버를 고루틴에서 띄우고, 리슨 실패는 채널로 전달한다. 지표 서버가 못 떠도 기동 실패다 —
+	// 지표 없이 조용히 뜨면 알림 규칙이 그 파드를 보지 못한다.
+	// 지표 서버는 따로 닫지 않는다. 종료 중에도 긁기를 받고, 프로세스가 끝날 때 함께 닫힌다.
+	serverErr := make(chan error, 2)
 	go func() {
 		slog.Info("linkpulse 시작", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+	go func() {
+		slog.Info("지표 서버 시작", "addr", metricsSrv.Addr)
+		if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
 	}()
@@ -239,14 +263,27 @@ func shutdown(srv interface{ Shutdown(context.Context) error }, drain func()) er
 }
 
 // newServer는 설정과 핸들러로 타임아웃이 세팅된 HTTP 서버를 조립한다.
-// 타임아웃 단언을 단위 테스트할 수 있게 main에서 분리했다.
-func newServer(cfg config.Config, handler http.Handler) *http.Server {
+// 타임아웃 단언을 단위 테스트할 수 있게 main에서 분리했다. connState는 새 연결 수 지표다(plan 0015).
+func newServer(cfg config.Config, handler http.Handler, connState func(net.Conn, http.ConnState)) *http.Server {
 	return &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		ConnState:         connState,
+	}
+}
+
+// newMetricsServer는 내부 포트(/metrics·pprof) 서버다(plan 0015). 공개 핸들러와 섞지 않는다 —
+// ALB·TargetGroupBinding은 8080만 보므로 이 포트는 밖에서 닿지 않는다.
+func newMetricsServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		WriteTimeout:      metricsWriteTimeout,
 		IdleTimeout:       idleTimeout,
 	}
 }

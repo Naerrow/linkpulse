@@ -12,23 +12,48 @@ import (
 //   - requestLogger를 최외곽에 둬 429를 포함한 모든 응답의 상태코드를 기록한다.
 //   - recoverer가 rateLimit을 감싸 리미터 자체 버그의 panic도 500으로 복구한다.
 //   - rateLimit이 최내곽이라 한도 초과 시 실제 핸들러 실행 전에 거부한다.
-func withMiddleware(rl *rateLimit, next http.Handler) http.Handler {
-	return requestLogger(recoverer(rl.middleware(next)))
+func withMiddleware(obs RequestObserver, rl *rateLimit, next http.Handler) http.Handler {
+	return requestLogger(obs, recoverer(rl.middleware(next)))
 }
 
-// requestLogger는 각 요청의 메서드·경로·상태코드·소요시간을 구조화 로깅한다.
-func requestLogger(next http.Handler) http.Handler {
+// RequestObserver는 요청 하나가 끝날 때 경로 패턴·메서드·상태코드·소요시간을 받는다(plan 0015 지표).
+// httpapi가 지표 라이브러리를 모르게 인터페이스로 받는다.
+type RequestObserver interface {
+	ObserveRequest(route, method string, status int, d time.Duration)
+}
+
+// requestLogger는 각 요청의 메서드·경로·상태코드·소요시간을 구조화 로깅하고, obs가 있으면 지표로도 넘긴다.
+func requestLogger(obs RequestObserver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
+		d := time.Since(start)
+		if obs != nil {
+			obs.ObserveRequest(routeLabel(r), r.Method, sw.status, d)
+		}
 		slog.Info("http request",
 			"method", r.Method,
 			"path", logPath(r.URL.Path),
 			"status", sw.status,
-			"duration_ms", time.Since(start).Milliseconds(),
+			"duration_ms", d.Milliseconds(),
 		)
 	})
+}
+
+// routeLabel은 지표의 route 라벨이다. 원시 경로가 아니라 ServeMux 패턴(예: "GET /{code}")을 쓴다 —
+// 경로를 쓰면 코드마다 시계열이 생기고 요청 ID가 지표에 남는다(logPath와 같은 이유).
+//
+// 전제: ServeMux는 next 안에서 같은 *Request의 Pattern을 채운다. 그래서 바깥 미들웨어가 next 뒤에 읽을 수 있다.
+// 체인 중간에서 요청을 복제하면(r.WithContext 등) 바깥에서는 빈 값만 보여 모두 "none"이 된다 —
+// TestRouteLabelThroughMiddleware가 지킨다. '/'로 끝나는 하위 트리 패턴을 더하면 mux의 슬래시 리디렉트가
+// 실제 경로를 Pattern에 넣으므로 그때 다시 본다(지금은 그런 패턴이 없다).
+// 리미터(429)처럼 mux 앞에서 끝났거나 mux가 맞추지 못한 요청(404·405)은 패턴이 비어 "none"이다.
+func routeLabel(r *http.Request) string {
+	if r.Pattern == "" {
+		return "none"
+	}
+	return r.Pattern
 }
 
 // recoverer는 하위 핸들러의 panic을 잡아 500으로 응답하고 로깅한다.

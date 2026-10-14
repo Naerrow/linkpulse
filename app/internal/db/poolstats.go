@@ -9,8 +9,9 @@ import (
 
 // LogPoolStats는 ctx가 끝날 때까지 interval마다 연결 풀 통계를 한 줄씩 남긴다(plan 0012).
 //
-// 풀이 찼다는 사실(대기 발생)을 보여 주는 임시 관측 수단이다. 이유(쿼리가 느려져서인지,
-// 풀이 작아서인지)는 보여 주지 않는다. Prometheus(plan 0015) 전까지 Logs Insights로 집계한다.
+// 풀이 찼다는 사실(대기 발생)을 보여 주는 관측 수단이다. 이유(쿼리가 느려져서인지,
+// 풀이 작아서인지)는 보여 주지 않는다. plan 0015부터 같은 통계가 /metrics(go_sql_*)에도 나가지만,
+// 이 줄은 남긴다 — 0012~0014 비교 쿼리와 로그 유실 검사(파드·분당 줄 수)가 쓴다.
 func LogPoolStats(ctx context.Context, pool *sql.DB, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
