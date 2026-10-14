@@ -1,0 +1,14 @@
+{{- if .Values.monitoring.enabled }}
+# Grafana 대시보드(plan 0015). Grafana 사이드카가 모든 네임스페이스에서 grafana_dashboard: "1" 라벨의 ConfigMap을 읽는다
+# (kube-prometheus-stack 기본값). 대시보드는 files/dashboard.json으로만 바꾼다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "linkpulse.fullname" . }}-dashboard
+  labels:
+    {{- include "linkpulse.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  linkpulse.json: |-
+    {{- .Files.Get "files/dashboard.json" | nindent 4 }}
+{{- end }}

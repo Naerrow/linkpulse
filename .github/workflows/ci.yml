@@ -54,6 +54,19 @@ jobs:
           echo "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3  /tmp/kubeconform.tar.gz" | sha256sum -c -
           tar -xzf /tmp/kubeconform.tar.gz -C /usr/local/bin kubeconform
 
+      # 알림 규칙 단위 테스트(promtool)와 Alertmanager 설정 검사(amtool)(plan 0015).
+      # 버전은 infra/k8s가 고정한 kube-prometheus-stack의 Prometheus·Alertmanager와 맞춘다. 체크섬은 각 릴리스의 sha256sums.txt.
+      - name: promtool·amtool 설치
+        working-directory: .
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/prometheus.tar.gz https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.linux-amd64.tar.gz
+          echo "2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0  /tmp/prometheus.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/prometheus.tar.gz -C /usr/local/bin --strip-components=1 prometheus-3.15.0.linux-amd64/promtool
+          curl -fsSL -o /tmp/alertmanager.tar.gz https://github.com/prometheus/alertmanager/releases/download/v0.34.1/alertmanager-0.34.1.linux-amd64.tar.gz
+          echo "265b9d1e55ef0d5306a436018af6d2b686c2ce051f03d968f7464ecb1372a7e8  /tmp/alertmanager.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/alertmanager.tar.gz -C /usr/local/bin --strip-components=1 alertmanager-0.34.1.linux-amd64/amtool
+
       - name: Helm 차트 검사
         working-directory: .
         run: scripts/check-charts.sh

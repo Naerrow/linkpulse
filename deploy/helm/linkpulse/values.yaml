@@ -53,6 +53,20 @@ serviceAccount:
 service:
   port: 8080
 
+# 내부 지표 포트(/metrics·/debug/pprof/, plan 0015). 앱은 늘 이 포트를 연다(METRICS_ADDR).
+# Service에도 이름 metrics로 둔다 — ServiceMonitor가 그 이름으로 긁는다. ALB·TargetGroupBinding은 8080만 본다.
+metrics:
+  port: 9090
+
+# Prometheus Operator CR(ServiceMonitor·PrometheusRule)과 Grafana 대시보드 ConfigMap(plan 0015).
+# 기본은 끈다 — CRD가 없는 클러스터에서 켜면 ArgoCD 동기화가 실패한다. kube-prometheus-stack을 넣은 사이트가 켠다.
+# 규칙·대시보드 내용은 files/에 있고 사이트와 무관하다. 알림을 어디로 보낼지는 사이트의 Alertmanager 설정이 정한다.
+# 사이트의 Prometheus는 release 라벨 없이도 모든 네임스페이스의 CR을 골라야 한다(*SelectorNilUsesHelmValues=false).
+monitoring:
+  enabled: false
+  # 앱 대상 긁기 간격. 측정 표가 분 단위라 15초면 분마다 표본 4개다.
+  scrapeInterval: 15s
+
 # 종료 순서: preStop sleep(LB에서 빠질 시간) → SIGTERM → 앱 종료(HTTP 10초 + 마지막 클릭 flush 5초).
 preStopSleepSeconds: 10
 terminationGracePeriodSeconds: 45
