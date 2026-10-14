@@ -4,7 +4,7 @@ AWS(ap-northeast-2)에 **EKS**로 배포한다(plan 0014 — P1~P4는 ECS Fargat
 
 - `bootstrap/` — Terraform state용 S3 버킷 1개만 생성(state는 로컬).
 - `prod/` — VPC·ALB·RDS·SQS·EKS(클러스터·노드·애드온)·IAM 등 AWS 리소스(S3 backend, 키 `prod/`).
-- `k8s/` — 클러스터 안의 것: LB 컨트롤러·ArgoCD·Image Updater·Fluent Bit·사이트 값(ConfigMap·Secret)·TargetGroupBinding·ArgoCD Application(S3 backend, 키 `k8s/`). helm·kubernetes provider는 클러스터가 있어야 설정되므로 `prod/` 다음에 따로 apply한다.
+- `k8s/` — 클러스터 안의 것: kube-prometheus-stack(Prometheus·Alertmanager·Grafana, plan 0015)·LB 컨트롤러·ArgoCD·Image Updater·Fluent Bit·사이트 값(ConfigMap·Secret)·TargetGroupBinding·ArgoCD Application(S3 backend, 키 `k8s/`). 차트 값 중 긴 것은 `k8s/values/*.tftpl`에 있다. helm·kubernetes provider는 클러스터가 있어야 설정되므로 `prod/` 다음에 따로 apply한다.
 - 앱 자체는 Terraform이 아니라 **ArgoCD가 git의 차트(`deploy/helm/linkpulse`)로** 배포한다. 이미지는 CI가 GHCR에 올리고, Image Updater가 `main` 다이제스트를 따라간다.
 
 ## 배포 순서
@@ -43,7 +43,7 @@ AWS(ap-northeast-2)에 **EKS**로 배포한다(plan 0014 — P1~P4는 ECS Fargat
    terraform plan && terraform apply
    ```
 
-   순서는 Terraform이 지킨다: 컨트롤러(LBC·ArgoCD·Image Updater) → site(ConfigMap·Secret·TGB) → gitops(Application·ImageUpdater). 그 뒤 ArgoCD가 앱을 동기화한다.
+   순서는 Terraform이 지킨다: kube-prometheus-stack(CRD) → 컨트롤러(LBC·ArgoCD·Image Updater) → site(ConfigMap·Secret·TGB) → gitops(Application·ImageUpdater). 그 뒤 ArgoCD가 앱을 동기화한다.
 
 6. **확인** — `kubectl -n linkpulse rollout status deploy/linkpulse`, `https://lpulse.live/healthz` 200, 단축/리다이렉트 동작, CloudWatch 로그(`/eks/linkpulse-prod/app`) 수신.
 
@@ -61,7 +61,7 @@ AWS(ap-northeast-2)에 **EKS**로 배포한다(plan 0014 — P1~P4는 ECS Fargat
 
 삭제하는 것:
 
-- 클러스터 안의 것(`infra/k8s`): Helm 릴리스(LBC·ArgoCD·Image Updater·Fluent Bit·site·gitops), 네임스페이스
+- 클러스터 안의 것(`infra/k8s`): Helm 릴리스(kube-prometheus-stack·LBC·ArgoCD·Image Updater·Fluent Bit·site·gitops), 네임스페이스. Prometheus 데이터(emptyDir, 보관 2일)도 함께 사라진다.
 - EKS 클러스터·노드 그룹·애드온·Pod Identity 연결, ALB, NAT Gateway/EIP, VPC/Subnet/Route table/Security group
 - RDS PostgreSQL 인스턴스와 자동 관리 Secrets Manager 시크릿
 - SQS 클릭 큐·DLQ, CloudWatch Logs/Alarms, SNS, Chatbot Slack 설정
@@ -132,7 +132,8 @@ finalizer에 걸려 멈추면 [alarm-response.md](../docs/runbooks/alarm-respons
 장애를 자동 감지해 Slack으로 통지한다. 경로: **CloudWatch Alarm → SNS(`linkpulse-prod-alarms`) → AWS Chatbot(Amazon Q Developer in chat applications) → Slack**. 알람 정의는 `monitoring.tf`, Slack 배선은 `chatbot.tf`.
 
 - **알람(초기값):** ALB 5개(target 5xx·ELB 5xx·unhealthy host·p95 지연·**healthy host 0=다운**), RDS 4개(CPU·여유 스토리지·여유 메모리·연결 수), 클릭 큐 2개(`sqs.tf`), 시크릿 이벤트 관찰 1개(`secret-events.tf`). 임계값은 실트래픽 보며 조정한다.
-- ECS 알람 3개(CPU·Memory·RunningTaskCount)는 plan 0014에서 지웠다. 파드 CPU·파드 수 알람은 0015(Prometheus)에서 둔다. Container Insights는 켜지 않는다.
+- ECS 알람 3개(CPU·Memory·RunningTaskCount)는 plan 0014에서 지웠다. Container Insights는 켜지 않는다.
+- **클러스터 안 Prometheus 알림(plan 0015, [ADR 0008](../docs/adr/0008-in-cluster-prometheus.md))**: SLO 소진·클릭 파이프라인·관리자 401·ArgoCD 동기화와 kube-prometheus-stack 기본 규칙(CrashLoop·HPA 최대·TargetDown 등). 경로는 Alertmanager → SNS(`linkpulse-prod-prom-alerts`, SMS 구독 없음) → 같은 Chatbot 채널 → **Slack만**이다. 사람을 깨우는 SMS는 위 CloudWatch 알람과 canary(클러스터 밖)에만 있다. 대응은 `docs/runbooks/alarm-response.md` "Prometheus 알림".
 
 ### Slack 연동 절차 (콘솔 OAuth는 사람이 1회)
 
@@ -148,7 +149,7 @@ finalizer에 걸려 멈추면 [alarm-response.md](../docs/runbooks/alarm-respons
 
 ### 배포 실패 알림 (plan 0014에서 지움)
 
-ECS 배포 실패 → EventBridge → Slack 경로(ADR 0003, `eventbridge.tf`)는 ECS와 함께 지웠다. ArgoCD 동기화 실패 알림은 0015에서 둔다.
+ECS 배포 실패 → EventBridge → Slack 경로(ADR 0003, `eventbridge.tf`)는 ECS와 함께 지웠다. ArgoCD 동기화 실패 알림은 plan 0015의 Prometheus 규칙 `LinkpulseArgoCDAppUnhealthy`(15분, Slack)가 맡는다.
 그 사이 배포 실패는 사용자에게 번지지 않는다 — 새 파드가 ALB에서 healthy가 되지 않으면 롤링이 멈추고 옛 파드가 남는다(readiness gate, surge 1·unavailable 0).
 확인은 `kubectl -n argocd get application linkpulse`와 `kubectl -n linkpulse rollout status deploy/linkpulse`.
 

@@ -396,3 +396,40 @@ DB 합계(teardown) = 2189636
 **재발 방지** — **로그 합계로 정합성을 판정하는 방식은 고부하에서 믿지 않는다.** 불일치가 나면 먼저 DB 합계와 k6 302 수를 비교하고, 분 단위로 k6 요청 수 대 로그 수를 비교해 로그 유실인지 가른다.
 0015에서 클릭 통계를 지표 카운터(Prometheus)로 옮긴다. Fluent Bit는 `storage.type filesystem` 버퍼·tail DB·`Rotate_Wait` 연장 중에서 고른다.
 측정 중에는 `kubectl -n logging logs -l app.kubernetes.io/name=fluent-bit | grep -ciE 'retry|paused|drop|error'`가 0이 아니면 그 줄을 바로 본다(README 3-1).
+
+## G-16. 차트 검사 단언이 큰 입력에서 Broken pipe로 실패했다 — 그리고 `exit`가 든 단언은 ❌ 없이 스크립트를 끝냈다
+
+**증상** — plan 0015에서 `scripts/check-charts.sh`에 kube-prometheus-stack 렌더 단언을 더했다(2026-10-14). 맞는 값인데 이렇게 나왔다.
+```
+scripts/check-charts.sh: line 36: printf: write error: Broken pipe
+❌ Alertmanager 서비스 어카운트 = infra/prod Pod Identity 키
+```
+변이 검사에서는 반대 문제가 나왔다. 선택자 값을 지운 변이에서 스크립트가 **❌ 줄 없이** 끝났다(종료 코드만 0이 아니었다).
+
+**원인**
+1. 단언은 `printf "%s" "$K" | grep -q ...` 꼴이다. `grep -q`는 첫 일치에서 바로 끝난다. 입력(렌더 수천 줄)이 파이프 버퍼보다 크면 `printf`가 남은 것을 쓰다가 SIGPIPE를 받고, `set -o pipefail`이라 파이프 전체가 실패한다. 작은 렌더에서는 드러나지 않는다.
+2. 단언은 `eval`로 돈다. 단언 안의 `for ...; do ... || exit 1; done`의 `exit`가 서브셸이 아니라 **스크립트 자체**를 끝냈다. 그래서 그 뒤의 `❌` 출력과 나머지 단언이 모두 빠졌다.
+
+**해결** — 큰 렌더는 임시 파일로 두고 `grep ... 파일`로 본다(파이프 없음). 앱 렌더(대시보드 JSON으로 커졌다)는 HPA 문서만 떼어 단언한다. 반복문 단언은 `( ... )` 서브셸로 감싼다.
+
+**재발 방지** — 단언을 더할 때 **틀린 값으로 실패하는지(❌가 찍히는지)와 맞는 값으로 통과하는지를 둘 다** 본다(G-14와 같은 원칙). 큰 입력에는 `printf | grep -q`를 쓰지 않는다. `eval` 안에서 `exit`를 쓰지 않는다.
+
+## G-17. promtool 테스트에서 `increase(x[1m])`가 비었다 — Prometheus 3은 범위 창의 왼쪽 끝을 뺀다
+
+**증상** — plan 0015 규칙 단위 테스트(`scripts/rules-test/linkpulse.test.yaml`, 1분 간격 합성 시계열)에서 발행 실패 알림(`increase(...[1m]) > 0`, `for: 5m`)이 8분에도 울리지 않았다.
+
+**원인** — Prometheus 3.0부터 범위 선택자는 왼쪽이 열린 구간 `(t−창, t]`이다. 1분 간격 표본에 `[1m]` 창이면 표본이 하나뿐이고, `increase()`·`rate()`는 표본이 둘 이상이어야 값을 낸다. 운영(긁기 15초)에서는 창에 표본이 4개라 드러나지 않는다.
+
+**해결** — 그 규칙의 창을 `[2m]`으로 늘렸다. 긁기 간격이 1분이어도 표본이 둘 이상 든다.
+
+**재발 방지** — 창 길이는 "긁기 간격의 2배 이상"으로 잡는다. 규칙을 합성 시계열로 시험할 때는 운영과 다른 간격(1분)으로도 통과하는지 본다. 이름 정규식으로 여러 카운터를 한 번에 `resets()`하면 이름이 빠져 라벨이 겹친다("vector cannot contain metrics with the same labelset") — 카운터마다 따로 계산해 더한다(`collect-metrics.sh` 정합성 절).
+
+## G-18. `terraform fmt -check -diff`를 `infra/prod` 디렉터리째 돌리자 gitignore된 `terraform.tfvars`의 값이 화면에 찍혔다
+
+**증상** — plan 0015 작업 중 `terraform fmt -check -diff .`(infra/prod)를 돌렸다(2026-10-14). 커밋 대상이 아닌 `terraform.tfvars`의 정렬 차이가 diff로 나오면서 Slack ID·SMS 번호 줄이 그대로 출력됐다.
+
+**원인** — `fmt`는 디렉터리의 `*.tf`뿐 아니라 `*.tfvars`도 검사하고, `-diff`는 그 내용을 찍는다. gitignore는 상관없다.
+
+**해결** — 그 출력은 대화·문서에 붙이지 않았다. 검사는 파일을 지정해서 한다: `terraform fmt -check infra/prod/*.tf infra/k8s/*.tf`.
+
+**재발 방지** — 비밀이 든 디렉터리(`infra/prod`·`infra/k8s`)에서는 `fmt`에 디렉터리나 `-diff`를 주지 않는다. CI는 tfvars가 없어 영향이 없다.

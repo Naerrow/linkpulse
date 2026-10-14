@@ -27,10 +27,10 @@ Built and operated as a production service, with a focus on reliability and obse
 클릭은 리다이렉트와 분리돼 SQS로 모아 반영합니다. 모든 AWS 리소스는 Terraform으로 관리(IaC)되며, VPC의 퍼블릭/프라이빗 서브넷으로 분리되어 있습니다.
 
 - IaC: Terraform · 클라우드: AWS(ap-northeast-2)
-- 런타임: EKS(관리형 노드 t4g.medium 2대) · 인그레스: 기존 ALB + TargetGroupBinding(AWS Load Balancer Controller)
+- 런타임: EKS(관리형 노드 t4g.medium 3대) · 인그레스: 기존 ALB + TargetGroupBinding(AWS Load Balancer Controller)
 - 데이터: RDS PostgreSQL(마스터 비밀번호는 Secrets Manager가 7일마다 자동 회전) · 큐: SQS
 - CI/CD: GitHub Actions(빌드·테스트·GHCR 푸시) → ArgoCD + Image Updater(GitOps 배포) · 차트: Helm(`deploy/helm/linkpulse`)
-- 관측성: CloudWatch(구조화 로깅·지표·알람, 로그는 Fluent Bit)
+- 관측성: CloudWatch(구조화 로깅·지표·알람, 로그는 Fluent Bit) · 클러스터 안 Prometheus·Grafana(앱 지표, SLO 소진 알림 → Slack, [ADR 0008](docs/adr/0008-in-cluster-prometheus.md))
 
 > 진행 단계: **P0~P4 완료(2026-10-07, Redis 캐시만 P5로 이관)** — 클라우드(ECS Fargate) 단독 운영 체계를 갖췄다. **P5 진행 중** — 한계 측정(0012)·클릭 집계 비동기화(0013) 완료, ECS→EKS(0014) 전환.
 > 다음은 **P5 AWS 완성**(Prometheus/Grafana) → **P6 하이브리드**(홈랩 k3s + VPN)
@@ -105,7 +105,7 @@ cd app && ADMIN_TOKEN_SHA256=c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b200
 
 AWS(ap-northeast-2) EKS 배포의 상세 런북은 [`infra/README.md`](infra/README.md)에 있습니다. 요약:
 
-- `infra/bootstrap` → state용 S3 버킷, `infra/prod` → AWS 리소스(VPC·ALB·EKS·RDS·SQS·IAM), `infra/k8s` → 클러스터 안(LB 컨트롤러·ArgoCD·Fluent Bit·사이트 값).
+- `infra/bootstrap` → state용 S3 버킷, `infra/prod` → AWS 리소스(VPC·ALB·EKS·RDS·SQS·IAM), `infra/k8s` → 클러스터 안(kube-prometheus-stack·LB 컨트롤러·ArgoCD·Fluent Bit·사이트 값).
 - **모든 `apply`는 사람이 직접**, **Terraform 1.10+** 필요(S3 네이티브 lockfile, DynamoDB 미사용).
 - 순서: bootstrap apply → prod apply → k8s apply → ArgoCD가 앱을 동기화. 켜고 끄기는 `scripts/full-apply-prod.sh`·`full-destroy-prod.sh`.
 - **이미지는 CI가 GHCR에 올리고 배포는 ArgoCD가**, `terraform apply`는 인프라만 담당합니다(경계: [ADR 0007](docs/adr/0007-ecs-to-eks.md)).
