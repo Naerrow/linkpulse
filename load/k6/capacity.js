@@ -82,15 +82,23 @@ export function setup() {
   const n = SCENARIO === 'hot' ? 1 : 100;
   const codes = [];
   for (let i = 0; i < n; i++) {
-    const res = http.post(
-      `${BASE}/api/links`,
-      JSON.stringify({ url: `https://example.com/k6/${Date.now()}-${i}` }),
-      {
-        headers: Object.assign({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, XFF),
-        responseType: 'text',
-        tags: { name: 'POST /api/links' },
-      },
-    );
+    // 응답을 아예 못 받은 경우(status 0 — 집 회선에서 연결이 멈춤, ops-gotchas G-21)만 세 번까지 다시 보낸다.
+    // 그 요청은 ALB에 닿지 않아 링크가 만들어지지 않았다. 닿았더라도 남는 것은 쓰지 않는 링크 하나다.
+    let res;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      res = http.post(
+        `${BASE}/api/links`,
+        JSON.stringify({ url: `https://example.com/k6/${Date.now()}-${i}` }),
+        {
+          headers: Object.assign({ 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, XFF),
+          responseType: 'text',
+          tags: { name: 'POST /api/links' },
+        },
+      );
+      if (res.status !== 0) break;
+      console.warn(`링크 생성 응답 없음(${attempt}/3) — ${res.error}`);
+      sleep(1);
+    }
     if (res.status !== 201) {
       // 429면 예외 IP가 안 맞은 것이다(운영: -var 값, 로컬: LOCAL_XFF).
       throw new Error(`링크 생성 실패: ${res.status} ${res.body}`);
