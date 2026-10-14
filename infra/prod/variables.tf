@@ -69,9 +69,9 @@ variable "node_instance_type" {
 }
 
 variable "node_count" {
-  description = "노드 수(최소·최대·희망이 모두 이 값). 오토스케일러가 없어 고정이다. 앱 최대 7개와 시스템 파드가 2대에 들어간다(ADR 0007 노드 수용)."
+  description = "노드 수(최소·최대·희망이 모두 이 값). 오토스케일러가 없어 고정이다. 앱 최대 7개·시스템 파드·kube-prometheus-stack이 3대에 들어간다(ADR 0007 노드 수용, plan 0015)."
   type        = number
-  default     = 2
+  default     = 3
 }
 
 variable "log_retention_days" {
@@ -81,15 +81,9 @@ variable "log_retention_days" {
 }
 
 variable "enable_alb_access_logs" {
-  description = "ALB 액세스 로그 S3 저장 활성화. 켜려면 alb_access_logs_bucket 필요."
+  description = "ALB 접근 로그를 켠다. 켜면 로그 버킷(7일 만료)을 이 스택이 만든다. 측정 apply에서만 -var enable_alb_access_logs=true로 켠다(plan 0015 502 분류)."
   type        = bool
   default     = false
-}
-
-variable "alb_access_logs_bucket" {
-  description = "ALB 액세스 로그를 저장할 기존 S3 버킷 이름(enable_alb_access_logs=true일 때)."
-  type        = string
-  default     = ""
 }
 
 variable "alarm_sms_number" {

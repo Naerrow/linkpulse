@@ -1,0 +1,70 @@
+# Fluent Bit 사이트 값(plan 0014, 0015에서 G-15 수정). infra/k8s/main.tf가 templatefile로 채운다
+# (app_namespace·region·log_group_name 세 자리). 이중 중괄호는 Fluent Bit 차트가 채우는 자리라 그대로 간다.
+# scripts/check-charts.sh가 같은 파일을 예시 값으로 채워 helm template으로 렌더하고 단언한다.
+#
+# 앱 파드의 stdout(JSON)만 CloudWatch Logs로 보낸다. 다른 네임스페이스·노드 로그는 보내지 않는다(비용).
+# kubernetes 필터의 Merge_Log가 앱 JSON을 최상위 필드로 풀어 ECS 시절 Logs Insights 쿼리(msg·task_id 등)가 그대로 돈다.
+# 로그 그룹은 infra/prod가 만든다(auto_create_group 끔 — IAM에 생성 권한이 없다).
+#
+# G-15(0014 hot 6400에서 파드 하나의 로그 2분 유실) 수정 — docs/runbooks/ops-gotchas.md:
+#   원인은 메모리 버퍼(Mem_Buf_Limit 5MB)가 차서 tail 입력이 멈춘 사이에 kubelet이 10Mi마다 로그를 회전한 것이다.
+#   - storage.type filesystem: 버퍼가 차도 입력을 멈추지 않고 디스크 청크로 넘긴다. 이때 Mem_Buf_Limit은 적용되지 않으므로
+#     (Fluent Bit 문서 "Backpressure") 지웠다. 메모리에 올리는 청크 수는 storage.max_chunks_up이 정한다.
+#   - DB: 파일별 읽은 위치를 노드(/var/log)에 저장한다 — Fluent Bit 파드가 다시 떠도 이어 읽는다.
+#   - Rotate_Wait 30: 회전된 파일을 30초 더 읽는다(기본 5초).
+#   경로는 차트가 hostPath로 붙이는 /var/log 아래다. 이 마운트는 readOnly가 아니다(차트 daemonSetVolumeMounts 기본값).
+serviceAccount:
+  name: fluent-bit
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+config:
+  # 차트 기본 [SERVICE]에 저장소 설정을 더했다. max_chunks_up 16(청크 약 2MB × 16)은 메모리 한도 128Mi 안에 들게 낮춘 값이다(기본 128).
+  service: |
+    [SERVICE]
+        Daemon Off
+        Flush {{ .Values.flush }}
+        Log_Level {{ .Values.logLevel }}
+        Parsers_File /fluent-bit/etc/parsers.conf
+        Parsers_File /fluent-bit/etc/conf/custom_parsers.conf
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port {{ .Values.metricsPort }}
+        Health_Check On
+        storage.path /var/log/flb-storage/
+        storage.sync normal
+        storage.checksum off
+        storage.max_chunks_up 16
+        storage.backlog.mem_limit 5M
+  inputs: |
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*_${app_namespace}_*.log
+        multiline.parser  cri
+        Tag               kube.*
+        storage.type      filesystem
+        DB                /var/log/flb_kube.db
+        Rotate_Wait       30
+        Skip_Long_Lines   On
+  filters: |
+    [FILTER]
+        Name         kubernetes
+        Match        kube.*
+        Merge_Log    On
+        Keep_Log     Off
+        Labels       Off
+        Annotations  Off
+  # 디스크 버퍼 상한(노드마다). 6400 rps 한 실행의 로그가 약 1.5GB라 출력이 밀려도 1G면 몇 분은 버틴다.
+  # 넘치면 가장 오래된 청크를 버린다 — 그러면 collect-metrics.sh의 파드·분당 줄 수 검사에 드러난다.
+  outputs: |
+    [OUTPUT]
+        Name                      cloudwatch_logs
+        Match                     kube.*
+        region                    ${region}
+        log_group_name            ${log_group_name}
+        log_stream_prefix         pod-
+        auto_create_group         false
+        storage.total_limit_size  1G

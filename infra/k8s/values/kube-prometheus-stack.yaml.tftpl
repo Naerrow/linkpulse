@@ -1,0 +1,115 @@
+# kube-prometheus-stack 사이트 값(plan 0015, ADR 0008). infra/k8s/main.tf가 templatefile로 채운다.
+# 채우는 자리는 달러 중괄호 두 개뿐이다: prom_alerts_topic_arn·region. 이중 중괄호({{ }})는 Alertmanager 템플릿이라 그대로 간다.
+# scripts/check-charts.sh가 같은 파일을 예시 값으로 채워 helm template으로 렌더하고 단언한다.
+
+# ---- EKS에서 긁을 수 없는 것 ----
+# 컨트롤 플레인(etcd·controller-manager·scheduler)은 AWS가 운영해 닿지 않고, kube-proxy는 지표를 127.0.0.1에만 연다.
+# 수집과 그 기본 규칙을 함께 끈다 — 켜 두면 TargetDown·KubeSchedulerDown 같은 알림이 늘 울린다.
+# 나머지 기본 규칙(KubePodCrashLooping·KubeHpaMaxedOut·TargetDown·노드 디스크 등)은 켠다.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeProxy: false
+
+# metrics-server와 같은 출처(kubelet /metrics/resource)도 긁는다 — 실험 E1이 cAdvisor·앱·이것 세 출처를 비교한다.
+# 차트 기본 경로는 옛 이름(/metrics/resource/v1alpha1)이라 바꾼다(쿠버네티스 1.18에 이름이 바뀌었다).
+kubelet:
+  serviceMonitor:
+    resource: true
+    resourcePath: /metrics/resource
+
+prometheus:
+  prometheusSpec:
+    # 선택자 계약(차트 ↔ 사이트): 앱 차트·ArgoCD 차트는 이 릴리스 이름을 모르므로 release 라벨을 넣을 수 없다.
+    # false면 라벨 없이 모든 네임스페이스의 ServiceMonitor·PodMonitor·PrometheusRule을 고른다.
+    # 빠지면 앱 대상이 수집되지 않고 규칙이 조용히 무시된다(측정 창 7-2가 /api/v1/rules로 확인한다).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    # 저장소는 기본 emptyDir이다(storageSpec을 두지 않는다). 인프라를 작업할 때만 켜므로 2일이면 충분하고,
+    # EBS CSI 드라이버·PVC를 들이지 않는다. 측정 원자료는 collect-metrics.sh가 쿼리 결과를 파일로 남긴다.
+    retention: 2d
+    # 노드 3대(t4g.medium)에 앱 최대 7개와 함께 들어가는 크기다(ADR 0007 노드 수용). 모자라면 보관부터 줄인다.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+grafana:
+  # adminPassword를 두지 않는다. 고정한 차트(91.8.2) values에는 adminPassword가 주석으로만 있어 하위 차트로 넘어가지 않고,
+  # Grafana 차트가 난수 40자 Secret을 만든다(charts/grafana/templates/_helpers.tpl grafana.password, 2026-10-14 확인).
+  # 옛 버전은 공개된 고정 문자열(prom-operator)을 넘겼다 — 차트를 올리면 다시 확인한다. 그 Secret은 화면에 찍지 않는다.
+  # 접근은 kubectl port-forward로만 한다(Service는 ClusterIP). 보기만 하는 익명 사용자를 켠다. 대시보드는 코드로만 바꾼다.
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Viewer
+  # 대시보드 사이드카 계약: 앱 차트의 ConfigMap 라벨(grafana_dashboard: "1")과 같아야 한다. 차트 기본값과 같지만 계약이라 적는다.
+  sidecar:
+    dashboards:
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+
+# ---- 알림: Alertmanager → SNS(prom-alerts, SMS 구독 없음) → Chatbot → Slack ----
+# 사람을 깨우는 경로(SMS)는 클러스터 밖 CloudWatch에만 있다. 여기는 Slack만 간다(ADR 0008 알림 등급 분리).
+# 자격증명은 EKS Pod Identity다. Alertmanager v0.34.1의 SNS 수신기는 access_key가 없으면 aws-sdk-go-v2 기본 체인
+# (awsconfig.LoadDefaultConfig)을 쓰고, 그 체인이 Pod Identity의 컨테이너 자격증명을 읽는다(notify/sns/sns.go, 2026-10-14 확인).
+alertmanager:
+  serviceAccount:
+    # infra/prod iam.tf pod_identities.alertmanager의 키다. 바꾸면 그쪽도 바꾼다.
+    name: alertmanager
+  # 차트 기본 설정(inhibit_rules·templates 경로)에 겹쳐 쓴다. 목록(receivers·routes)은 통째로 바뀐다.
+  config:
+    route:
+      receiver: slack
+      # 알림 이름마다 한 메시지다(파드별 알림은 한 메시지에 묶인다).
+      group_by: [alertname]
+      repeat_interval: 4h
+      routes:
+        # Watchdog(늘 울리는 생존 신호)·InfoInhibitor는 보내지 않는다. 외부 dead man's switch는 P7로 넘겼다.
+        - receiver: "null"
+          matchers:
+            - alertname =~ "Watchdog|InfoInhibitor"
+    receivers:
+      - name: "null"
+      - name: slack
+        sns_configs:
+          - topic_arn: ${prom_alerts_topic_arn}
+            sigv4:
+              region: ${region}
+            send_resolved: true
+            # SNS Subject는 ASCII·100자 미만이어야 한다(기본 제목은 라벨을 다 붙여 넘칠 수 있다). Chatbot은 본문만 본다.
+            subject: '{{ .Status | toUpper }} {{ .CommonLabels.alertname }}'
+            message: '{{ template "linkpulse.chatbot" . }}'
+  # Chatbot 사용자 지정 알림 JSON(version 1.0, source custom). description은 8,000자 상한이라 알림 10개까지만 적는다.
+  # 문자열은 toJson으로 만든다 — 주석의 따옴표·줄바꿈이 JSON을 깨지 않는다.
+  templateFiles:
+    linkpulse.tmpl: |-
+      {{- define "linkpulse.chatbot" -}}
+      {{- $desc := "" -}}
+      {{- range $i, $a := .Alerts -}}
+      {{- if lt $i 10 -}}
+      {{- $where := $a.Labels.Remove (stringSlice "alertname" "severity" "slo" "prometheus") -}}
+      {{- $desc = printf "%s• *%s* %s\n    %s\n" $desc ($a.Status | toUpper) (or $a.Annotations.description $a.Annotations.summary $a.Annotations.message) $where.String -}}
+      {{- end -}}
+      {{- end -}}
+      {{- if gt (len .Alerts) 10 -}}
+      {{- $desc = printf "%s… 전체 %d건 중 10건만 적었다(나머지는 Alertmanager에서 본다)\n" $desc (len .Alerts) -}}
+      {{- end -}}
+      {{- $title := printf "%s %s · %s (%d)" (.Status | toUpper) .CommonLabels.alertname (or .CommonLabels.severity "none") (len .Alerts) -}}
+      {{- toJson (dict "version" "1.0" "source" "custom" "content" (dict "textType" "client-markdown" "title" $title "description" $desc)) -}}
+      {{- end -}}
