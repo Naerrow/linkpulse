@@ -49,12 +49,17 @@ locals {
 }
 
 # ---- 애드온 ----
-# 버전은 클러스터 버전의 기본(default) 애드온 버전이다. 클러스터 버전을 고정했으므로 plan에 보이는 값이 고정값이다.
+# 버전은 클러스터 버전의 기본(default) 애드온 버전이다(addon_version_pins에 있는 것만 고정값). 기본 버전은 AWS가 바꿀 수 있다.
 locals {
   # 노드보다 먼저: 노드가 Ready가 되려면 CNI가, Pod Identity가 동작하려면 에이전트가 있어야 한다.
   addons_before_nodes = ["vpc-cni", "kube-proxy", "eks-pod-identity-agent"]
   # 노드 다음: Deployment라 노드가 없으면 ACTIVE가 되지 않는다. metrics-server는 HPA의 CPU 지표다.
   addons_after_nodes = ["coredns", "metrics-server"]
+
+  # 기본 버전 대신 고정하는 애드온. metrics-server 기본 v0.9.0-eksbuild.12(Go 1.27.2 빌드)는 OpenAPI v2 스펙을 깨진 JSON으로 내서
+  # 클러스터의 /openapi/v2 protobuf가 503이 된다 — helm 검증(LBC)과 ArgoCD 클러스터 캐시가 실패한다(ops-gotchas G-20).
+  # .11(Go 1.26.6)은 정상이다. 올릴 때는 그 버전에서 /openapi/v2를 protobuf로 받아 200인지 먼저 본다.
+  addon_version_pins = { "metrics-server" = "v0.9.0-eksbuild.11" }
 }
 
 data "aws_eks_addon_version" "this" {
@@ -76,7 +81,7 @@ resource "aws_eks_addon" "after_nodes" {
   for_each                    = toset(local.addons_after_nodes)
   cluster_name                = aws_eks_cluster.main.name
   addon_name                  = each.value
-  addon_version               = data.aws_eks_addon_version.this[each.value].version
+  addon_version               = lookup(local.addon_version_pins, each.value, data.aws_eks_addon_version.this[each.value].version)
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
