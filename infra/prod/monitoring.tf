@@ -1,7 +1,9 @@
 # P3 관측성 — CloudWatch 알람 + SNS(통지 팬아웃). Slack 배선은 chatbot.tf.
 # 감지 경로: CloudWatch Alarm -> SNS topic -> (AWS Chatbot) -> Slack.
 # data.aws_caller_identity.current 는 iam.tf 에 선언돼 있어 재사용한다(재선언 금지).
-# 파드 CPU·파드 수 알람은 0015(Prometheus)에서 둔다. 가용성은 ALB 알람과 canary가 맡는다(plan 0014).
+# 파드 CrashLoop·HPA 최대·대상 다운은 클러스터 안 Prometheus 기본 규칙이 맡는다(plan 0015, ADR 0008) — 그 알림은
+# 아래 prom_alerts 토픽으로 Slack에만 간다. 사람을 깨우는 경로(SMS)는 클러스터 밖인 여기(CloudWatch·canary)에만 둔다.
+# 가용성은 ALB 알람과 canary가 맡는다(plan 0014).
 # 임계값은 "초기값"이다 — 실트래픽을 보며 조정한다(ADR 0002 참고).
 
 locals {
@@ -29,6 +31,16 @@ resource "aws_sns_topic_subscription" "alarms_sms" {
   topic_arn = aws_sns_topic.alarms.arn
   protocol  = "sms"
   endpoint  = var.alarm_sms_number
+}
+
+# ---- SNS: Prometheus 알림(Alertmanager) → Chatbot → Slack (plan 0015) ----
+# SMS를 구독하지 않는 별도 토픽이다 — Alertmanager가 보내는 Chatbot용 JSON이 문자로 가지 않게 한다.
+# 발행 주체는 Alertmanager 파드 역할 하나다(iam.tf pod_alertmanager). 같은 계정 IAM 주체라 토픽 정책을 따로 두지 않는다.
+# SSE를 두지 않는 이유는 위 alarms 토픽과 같다(알림에 민감정보 없음).
+#tfsec:ignore:aws-sns-enable-topic-encryption
+resource "aws_sns_topic" "prom_alerts" {
+  name = "${local.name_prefix}-prom-alerts"
+  tags = { Name = "${local.name_prefix}-prom-alerts" }
 }
 
 # CloudWatch 알람만 이 토픽에 publish 허용 + confused-deputy 방지(SourceArn/SourceAccount).

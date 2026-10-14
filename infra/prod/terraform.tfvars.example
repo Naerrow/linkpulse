@@ -11,7 +11,7 @@ domain_name = "lpulse.live"
 # db_instance_class  = "db.t4g.micro"
 # eks_version        = "1.37"        # apply 전 aws eks describe-cluster-versions로 표준 지원인지 확인
 # node_instance_type = "t4g.medium"
-# node_count         = 2
+# node_count         = 3
 
 # ---- 모니터링 / Slack 알림 (P3) ----
 # Slack 통지: AWS 콘솔 "Amazon Q Developer in chat applications"에서 workspace를 OAuth 승인한 뒤

@@ -1,0 +1,12 @@
+{{- if .Values.monitoring.enabled }}
+# SLO·클릭·관리자 401·ArgoCD 알림 규칙(plan 0015). 내용은 files/rules.yaml이다 — promtool이 같은 파일을 시험한다.
+# .Files.Get은 템플릿을 거치지 않아 규칙 주석의 {{ "{{" }} $value {{ "}}" }}가 그대로 Prometheus에 간다.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "linkpulse.fullname" . }}
+  labels:
+    {{- include "linkpulse.labels" . | nindent 4 }}
+spec:
+  {{- .Files.Get "files/rules.yaml" | nindent 2 }}
+{{- end }}

@@ -13,7 +13,7 @@
 
 ## 결정
 
-1. **EKS + 관리형 노드 그룹(t4g.medium 2대 고정).** Auto Mode·Karpenter·Cluster Autoscaler는 쓰지 않는다 — 노드 2대에는 관리할 것만 늘고, 무엇이 도는지 보이는 구성을 고른다. 오토스케일러가 없으니 최대치도 2다.
+1. **EKS + 관리형 노드 그룹(t4g.medium 2대 고정 — plan 0015에서 3대, [ADR 0008](0008-in-cluster-prometheus.md)).** Auto Mode·Karpenter·Cluster Autoscaler는 쓰지 않는다 — 노드 2대에는 관리할 것만 늘고, 무엇이 도는지 보이는 구성을 고른다. 오토스케일러가 없으니 최대치도 2다.
 2. **기존 ALB·리스너·타깃 그룹을 그대로 두고 TargetGroupBinding으로 파드 IP만 등록한다.** LB 컨트롤러는 ALB를 만들지 않는다.
    - ALB 알람·canary·ACM·Route53·`collect-metrics.sh`의 ALB 지표가 그대로 산다.
    - destroy 때 컨트롤러가 만든 ALB·SG가 남아 VPC 삭제를 막는 일이 없다.
@@ -51,28 +51,30 @@
 - **API 엔드포인트 공개 + 사설.** 공개 쪽은 IAM 인증·액세스 엔트리(클러스터를 만든 운영자만 관리자)가 막는다. 운영자 IP가 회사·집을 오가 CIDR 제한을 두지 않았다. 문제가 되면 `public_access_cidrs` 변수를 더한다.
 - **노드 SG(EKS 클러스터 SG)는 egress를 전부 허용한다 — P4의 "HTTPS/DNS/DB만" 제한을 잃었다.** t4g는 파드별 SG를 지원하지 않아 파드가 노드 SG를 쓴다. 노드 전용 SG(시작 템플릿)로 제한을 지키려면 컨트롤 플레인·노드 간·웹훅 규칙을 직접 관리해야 해서, 노드 2대 구성에 그 복잡도를 들이지 않았다. 원래 규칙도 443은 0.0.0.0/0이었다. 수신은 여전히 ALB에서 8080만 더한다.
 - **LB 컨트롤러는 공식 IAM 정책을 그대로 쓴다**(v3.6.0, `infra/prod/policies/`). TGB만 쓰는 데 비해 넓지만, 기동·조정 때 부르는 API를 손으로 줄이면 버전마다 깨질 수 있다. 차트 버전을 올리면 같은 태그의 정책으로 바꾼다.
-- **배포 실패 알림 공백.** ECS 배포 실패 → Slack(ADR 0003)이 없어졌다. ArgoCD 동기화 실패 알림은 0015다. 그 사이 배포 실패는 사용자에게 번지지 않는다 — 새 파드가 healthy가 되지 않으면 롤링이 멈추고 옛 파드가 남는다. 가용성은 ALB 알람·canary가 본다.
-- **파드 CPU·파드 수 알람 공백**(ECS 알람 3개 삭제). 0015에서 Prometheus로 둔다.
+- **배포 실패 알림 공백.** ECS 배포 실패 → Slack(ADR 0003)이 없어졌다. ArgoCD 동기화 실패 알림은 0015다(→ [ADR 0008](0008-in-cluster-prometheus.md)에서 `LinkpulseArgoCDAppUnhealthy`로 닫았다). 그 사이 배포 실패는 사용자에게 번지지 않는다 — 새 파드가 healthy가 되지 않으면 롤링이 멈추고 옛 파드가 남는다. 가용성은 ALB 알람·canary가 본다.
+- **파드 CPU·파드 수 알람 공백**(ECS 알람 3개 삭제). 0015에서 Prometheus로 둔다(→ ADR 0008: kube-prometheus-stack 기본 규칙 `KubePodCrashLooping`·`KubeHpaMaxedOut`·`TargetDown`, Slack만).
 - **t4g는 버스트형이다.** T4g 기본 크레딧 `unlimited`라 기준선(20%)에 묶이지 않는다(9-1에서 확인). Fargate(비버스트)와 다르다는 점을 결과에 적는다.
 - **비용**: EKS 컨트롤 플레인 시간당 0.10달러 + 노드 2대. 작업할 때만 켠다.
 - **tfsec 지적 중 받아들인 것**(`infra/prod/eks.tf`에 ignore 주석): 공개 엔드포인트·0.0.0.0/0(위), Secret 암호화 미설정(EKS 1.28+는 모든 API 데이터를 AWS 소유 키로 기본 봉투 암호화한다 — EKS 사용자 가이드 *Default envelope encryption*), 컨트롤 플레인 로그 미설정(켜고 끄는 측정 클러스터라 비용만 는다). 나머지 지적(ALB 공개, SNS 암호화 등)은 이번 변경 전부터 있던 것이다.
 
-## 노드 수용 (t4g.medium 2대, 노드당 파드 17개)
+## 노드 수용 (t4g.medium 3대, 노드당 파드 17개 — plan 0015에서 2대 → 3대)
 
-앱 최대 7개(HPA 6 + surge 1)와 시스템 파드가 들어가야 한다. 요청(requests) 기준 계산이다. 애드온 기본 요청은 추정이 섞여 있어 측정 창 9-1에서 `kubectl describe nodes`로 확인한다.
+앱 최대 7개(HPA 6 + surge 1)와 시스템 파드, kube-prometheus-stack(plan 0015)이 들어가야 한다. 요청(requests) 기준 계산이다. 애드온 기본 요청은 추정이 섞여 있어 측정 창에서 `kubectl describe nodes`로 확인한다.
+2대로는 파드 33~34/34·메모리 요청 약 5.9/6.7GiB로 꽉 차서 3대로 늘렸다. t4g.large 2대(슬롯 70개)보다 싸고, 같은 노드 종류라 0014와 CPU 비교 조건이 덜 바뀐다.
 
 | 구성 요소 | 파드 | CPU 요청 | 메모리 요청 |
 | --- | --- | --- | --- |
 | 앱(최대) | 7 | 7 × 250m = 1750m | 7 × 512Mi = 3584Mi |
-| DaemonSet(aws-node·kube-proxy·pod-identity-agent·fluent-bit) | 4 × 2 = 8 | 약 450m | 약 200Mi |
+| DaemonSet(aws-node·kube-proxy·pod-identity-agent·fluent-bit·node-exporter) | 5 × 3 = 15 | 약 675m | 약 300Mi |
 | coredns | 2 | 200m | 140Mi |
 | metrics-server | 1~2 | 200m 이하 | 400Mi 이하 |
 | LB 컨트롤러 | 2 | (차트 기본 없음) | — |
 | ArgoCD(controller·repo-server·server·redis, appset 0개·dex·notifications 끔) | 4 | (차트 기본 없음) | — |
 | Image Updater | 1 | — | — |
-| **합** | **최대 26 / 34** | **약 2.6 / 할당 약 3.8 vCPU** | **약 4.3 / 할당 약 6.7 GiB** |
+| kube-prometheus-stack(operator·Prometheus·Alertmanager·Grafana·kube-state-metrics) | 5 | Prometheus 250m(나머지 차트 기본 없음) | Prometheus 1Gi(한도 2Gi) |
+| **합** | **최대 38 / 51** | **약 3.1 / 할당 약 5.7 vCPU** | **약 5.3 / 할당 약 10 GiB** |
 
-ArgoCD·LB 컨트롤러는 요청이 없어 스케줄은 막지 않지만 실제 메모리를 쓴다(합쳐 1GiB 안팎으로 본다). 여유가 모자라면 앱 `maxReplicas`부터 낮춘다(연결 예산도 같이 다시 계산).
+ArgoCD·LB 컨트롤러·Grafana 등은 요청이 없어 스케줄은 막지 않지만 실제 메모리를 쓴다(합쳐 1.5GiB 안팎으로 본다). 여유가 모자라면 앱 `maxReplicas`가 아니라 Prometheus 자원·보관부터 줄이고, 그래도 모자라면 노드를 4대로 한다.
 
 ## 결과
 

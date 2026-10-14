@@ -33,6 +33,7 @@ const defaultConnMaxLifetime = db.DefaultConnMaxLifetime
 // Config는 실행에 필요한 설정값 모음이다.
 type Config struct {
 	Port            string // 리슨 포트 (APP_PORT, 기본 8080)
+	MetricsAddr     string // 내부 지표 포트 주소 (METRICS_ADDR, 기본 :9090, plan 0015). /metrics·pprof만 둔다
 	LogLevel        string // 로그 레벨 (LOG_LEVEL): debug|info|warn|error
 	PublicBaseURL   string // 단축 URL에 붙일 외부 공개 주소 (PUBLIC_BASE_URL)
 	ShortCodeLength int    // 단축 코드 길이 (SHORT_CODE_LENGTH, 기본 7)
@@ -162,6 +163,7 @@ func Load() (Config, error) {
 
 	return Config{
 		Port:            getEnv("APP_PORT", "8080"),
+		MetricsAddr:     getEnv("METRICS_ADDR", ":9090"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
 		PublicBaseURL:   baseURL,
 		ShortCodeLength: codeLen,

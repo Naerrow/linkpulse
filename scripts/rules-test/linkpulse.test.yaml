@@ -1,0 +1,206 @@
+# promtool 단위 테스트(plan 0015 단계 2). 차트의 규칙 파일을 합성 시계열로 돌린다. scripts/check-charts.sh가 실행한다.
+#   promtool test rules scripts/rules-test/linkpulse.test.yaml
+# 값 표기: a+bxn = a에서 시작해 b씩 n번 늘린 n+1개 값. 간격은 각 테스트의 interval(1m)이다.
+rule_files:
+  - ../../deploy/helm/linkpulse/files/rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # 1. 빠른 소진: 초당 10건 중 10%가 5xx(분당 540 정상 + 60 오류). 1시간·5분 모두 7.2%를 넘는다.
+  #    느린 소진(6시간·30분 3%)도 함께 울린다 — 빠른 소진이 critical, 느린 소진이 warning이다.
+  - interval: 1m
+    input_series:
+      - series: 'linkpulse_http_requests_total{route="GET /{code}",method="GET",code="302"}'
+        values: '0+540x70'
+      - series: 'linkpulse_http_requests_total{route="GET /{code}",method="GET",code="500"}'
+        values: '0+60x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: LinkpulseAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels: {severity: critical, slo: availability}
+            exp_annotations:
+              summary: 가용성 에러 버짓 빠른 소진(14.4배, 1시간·5분)
+              description: 리다이렉트·링크 조회의 1시간 5xx 비율이 10%다(버짓 0.5%). 런북 docs/runbooks/alarm-response.md P-1.
+      - eval_time: 65m
+        alertname: LinkpulseAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels: {severity: warning, slo: availability}
+            exp_annotations:
+              summary: 가용성 에러 버짓 느린 소진(6배, 6시간·30분)
+              description: 리다이렉트·링크 조회의 6시간 5xx 비율이 10%다(버짓 0.5%). 런북 docs/runbooks/alarm-response.md P-1.
+
+  # 2. 저트래픽 보호: 초당 0.1건(분당 6건) 중 절반이 5xx여도 울리지 않는다.
+  - interval: 1m
+    input_series:
+      - series: 'linkpulse_http_requests_total{route="GET /{code}",method="GET",code="302"}'
+        values: '0+3x70'
+      - series: 'linkpulse_http_requests_total{route="GET /{code}",method="GET",code="500"}'
+        values: '0+3x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: LinkpulseAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: LinkpulseAvailabilitySlowBurn
+        exp_alerts: []
+
+  # 3. 느린 소진의 두 창: 5% 오류(3%와 7.2% 사이)가 6시간 넘게 이어지면 느린 소진만 울린다.
+  #    330분에 오류가 멈추면 6시간 비율은 아직 3%를 넘지만 30분 비율이 0이라 울리지 않는다(AND 조건).
+  - interval: 1m
+    input_series:
+      - series: 'linkpulse_http_requests_total{route="GET /api/links/{code}",method="GET",code="200"}'
+        values: '0+570x400'
+      - series: 'linkpulse_http_requests_total{route="GET /api/links/{code}",method="GET",code="503"}'
+        values: '0+30x330 9900+0x69'
+    alert_rule_test:
+      - eval_time: 320m
+        alertname: LinkpulseAvailabilityFastBurn
+        exp_alerts: []
+      - eval_time: 320m
+        alertname: LinkpulseAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels: {severity: warning, slo: availability}
+            exp_annotations:
+              summary: 가용성 에러 버짓 느린 소진(6배, 6시간·30분)
+              description: 리다이렉트·링크 조회의 6시간 5xx 비율이 5%다(버짓 0.5%). 런북 docs/runbooks/alarm-response.md P-1.
+      - eval_time: 400m
+        alertname: LinkpulseAvailabilitySlowBurn
+        exp_alerts: []
+
+  # 4. 지연 빠른 소진: 20%가 100ms를 넘는다(le="0.1" 버킷이 전체의 80%).
+  - interval: 1m
+    input_series:
+      - series: 'linkpulse_http_requests_total{route="GET /{code}",method="GET",code="302"}'
+        values: '0+600x70'
+      - series: 'linkpulse_http_request_duration_seconds_bucket{route="GET /{code}",le="0.1"}'
+        values: '0+480x70'
+      - series: 'linkpulse_http_request_duration_seconds_count{route="GET /{code}"}'
+        values: '0+600x70'
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: LinkpulseLatencyFastBurn
+        exp_alerts:
+          - exp_labels: {severity: critical, slo: latency}
+            exp_annotations:
+              summary: 지연 에러 버짓 빠른 소진(14.4배, 1시간·5분)
+              description: 리다이렉트·링크 조회 중 100ms를 넘긴 비율이 1시간 20%다(버짓 1%). 런북 docs/runbooks/alarm-response.md P-1.
+      # 관리자 경로는 SLI가 아니다 — 같은 시계열에 섞이지 않는다(가용성 알림 없음).
+      - eval_time: 65m
+        alertname: LinkpulseAvailabilityFastBurn
+        exp_alerts: []
+
+  # 5. 클릭 유실: 4분에 5개를 버렸다. 5분 창 안에서는 울리고, 창을 벗어나면 풀린다.
+  - interval: 1m
+    input_series:
+      - series: 'linkpulse_clicks_dropped_total{pod="linkpulse-a"}'
+        values: '0 0 0 0 5 5 5 5 5 5 5 5'
+      - series: 'linkpulse_clicks_dropped_total{pod="linkpulse-b"}'
+        values: '0+0x11'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LinkpulseClicksDropped
+        exp_alerts:
+          - exp_labels: {severity: critical, pod: linkpulse-a}
+            exp_annotations:
+              summary: 클릭 유실 — 대기 상한에 걸려 버린 클릭이 있다
+              description: linkpulse-a가 5분 동안 클릭 5개를 버렸다. 큐(SQS)로 보내지 못한 코드가 상한(10만)까지 쌓였다. 런북 docs/runbooks/alarm-response.md P-2.
+      - eval_time: 11m
+        alertname: LinkpulseClicksDropped
+        exp_alerts: []
+
+  # 6. 발행 실패: 분마다 실패가 이어지면 5분 뒤에 울린다. 그 전(pending)에는 울리지 않는다.
+  - interval: 1m
+    input_series:
+      - series: 'linkpulse_clicks_publish_errors_total{pod="linkpulse-a"}'
+        values: '0+2x12'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LinkpulseClickPublishErrors
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: LinkpulseClickPublishErrors
+        exp_alerts:
+          - exp_labels: {severity: warning, pod: linkpulse-a}
+            exp_annotations:
+              summary: 클릭 발행 실패가 5분 넘게 이어진다
+              description: linkpulse-a가 큐(SQS)로 배치를 보내지 못하고 있다. 지금은 메모리에 쌓이고, 상한에 닿으면 유실(LinkpulseClicksDropped)이 된다. 런북 docs/runbooks/alarm-response.md P-2.
+
+  # 7. 관리자 401: 10분에 30건이면 울린다.
+  - interval: 1m
+    input_series:
+      - series: 'linkpulse_http_requests_total{route="POST /api/links",method="POST",code="401"}'
+        values: '0+3x12'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: LinkpulseAdminAuthFailures
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: 관리자 인증 실패가 10분에 20건을 넘었다
+              description: 관리자 경로 401이 10분 동안 30건이다. 비밀번호 추측일 수 있다. 런북 docs/runbooks/alarm-response.md P-3.
+
+  # 8. ArgoCD: 15분 넘게 OutOfSync면 울린다. 상태 라벨이 중간에 바뀌어도 타이머가 이어진다.
+  - interval: 1m
+    input_series:
+      - series: 'argocd_app_info{name="linkpulse",sync_status="OutOfSync",health_status="Healthy"}'
+        values: '1x8 _x12'
+      - series: 'argocd_app_info{name="linkpulse",sync_status="Unknown",health_status="Healthy"}'
+        values: '_x8 1x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LinkpulseArgoCDAppUnhealthy
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: LinkpulseArgoCDAppUnhealthy
+        exp_alerts:
+          - exp_labels: {severity: warning, name: linkpulse}
+            exp_annotations:
+              summary: ArgoCD 애플리케이션이 15분 넘게 Synced·Healthy가 아니다
+              description: linkpulse의 동기화 또는 상태가 15분 동안 정상이 아니다. 새 파드가 뜨지 않으면 롤링이 멈추고 옛 파드가 남는다. 런북 docs/runbooks/alarm-response.md P-4.
+
+  # 9. 빠른 소진의 5분 창: 10% 오류가 60분에 멈추면 70분에는 1시간 비율(약 8.5%)이 아직 7.2%를 넘어도 풀린다.
+  #    5분 창이 없으면 회복 뒤에도 알림이 1시간 가까이 남는다.
+  - interval: 1m
+    input_series:
+      - series: 'linkpulse_http_requests_total{route="GET /{code}",method="GET",code="302"}'
+        values: '0+540x80'
+      - series: 'linkpulse_http_requests_total{route="GET /{code}",method="GET",code="500"}'
+        values: '0+60x60 3600+0x20'
+    alert_rule_test:
+      - eval_time: 58m
+        alertname: LinkpulseAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels: {severity: critical, slo: availability}
+            exp_annotations:
+              summary: 가용성 에러 버짓 빠른 소진(14.4배, 1시간·5분)
+              description: 리다이렉트·링크 조회의 1시간 5xx 비율이 10%다(버짓 0.5%). 런북 docs/runbooks/alarm-response.md P-1.
+      - eval_time: 70m
+        alertname: LinkpulseAvailabilityFastBurn
+        exp_alerts: []
+
+  # 10. 지연 느린 소진: 10%가 100ms를 넘는 상태(6%와 14.4% 사이)가 이어지면 느린 소진만 울린다.
+  #     330분에 느린 요청이 멈추면 6시간 비율은 아직 6%를 넘지만 30분 비율이 0이라 400분에는 풀린다.
+  - interval: 1m
+    input_series:
+      - series: 'linkpulse_http_requests_total{route="GET /{code}",method="GET",code="302"}'
+        values: '0+600x400'
+      - series: 'linkpulse_http_request_duration_seconds_bucket{route="GET /{code}",le="0.1"}'
+        values: '0+540x330 178800+600x69'
+      - series: 'linkpulse_http_request_duration_seconds_count{route="GET /{code}"}'
+        values: '0+600x400'
+    alert_rule_test:
+      - eval_time: 320m
+        alertname: LinkpulseLatencyFastBurn
+        exp_alerts: []
+      - eval_time: 320m
+        alertname: LinkpulseLatencySlowBurn
+        exp_alerts:
+          - exp_labels: {severity: warning, slo: latency}
+            exp_annotations:
+              summary: 지연 에러 버짓 느린 소진(6배, 6시간·30분)
+              description: 리다이렉트·링크 조회 중 100ms를 넘긴 비율이 6시간 10%다(버짓 1%). 런북 docs/runbooks/alarm-response.md P-1.
+      - eval_time: 400m
+        alertname: LinkpulseLatencySlowBurn
+        exp_alerts: []

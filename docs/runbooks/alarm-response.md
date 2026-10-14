@@ -6,6 +6,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 - 알람 정의(임계값의 소스오브트루스): `infra/prod/monitoring.tf` — **임계값은 전부 초기값**, 오탐이 반복되면 §튜닝 노트를 보고 Terraform으로 조정(사람 apply)
 - 표기: 명령은 read-only가 기본. 상태를 바꾸는 명령은 **[사람]** 표기 — 에이전트 자율 실행 금지(가드레일 #1)
 - 로그 조회 쿼리 모음·Slack 배선 점검은 [`infra/README.md`](../../infra/README.md) 참고
+- 🔔 **plan 0015부터 클러스터 안 Prometheus 알림이 같은 Slack 채널에 온다** — 경로가 다르다: Alertmanager → SNS(`linkpulse-prod-prom-alerts`, **SMS 없음**) → Chatbot → Slack. 카드 꼬리에 "Custom notification"이 붙고 제목이 `FIRING <알림 이름> · <등급> (<건수>)`다. 그 알림은 아래 [Prometheus 알림](#prometheus-알림-plan-0015--slack만) 절(P-번호)을 따른다. 사람을 깨우는 SMS는 여전히 이 문서의 CloudWatch 알람·canary만 보낸다([ADR 0008](../adr/0008-in-cluster-prometheus.md)).
 - 🔁 **plan 0014부터 앱은 EKS에서 돈다**(ECS 없음). 명령은 `kubectl`이고, 배포는 ArgoCD가 한다(CI는 GHCR 푸시만). 처음 한 번 `aws eks update-kubeconfig --name linkpulse-prod-eks --region ap-northeast-2`. 설계 근거는 [ADR 0007](../adr/0007-ecs-to-eks.md).
 - ✅ **2026-10-07부터 로테이션은 사람 개입 없이 회복된다** — Step 2(앱이 런타임에 비밀번호 재조회)가 라이브다. 온디맨드 회전 실측: 503 약 61초, 앱 자체 회복. **plan 0014에서 Step 1(회전 때 ECS 강제 재배포 Lambda)은 지웠다** — EKS에서의 확인은 측정 창의 회전 드릴이다. 회전 직후 알람의 처리는 아래 "비밀번호 로테이션 직후라면"을 따른다. 아래 ⛔ 줄은 Step 2 이전의 이력이다(다음 창은 브릿지 (a)로 재계산 — 10-07 기준 `NextRotationDate` 10-15 08:59:59 KST).
 - ⛔ **예정된 RDS 비밀번호 로테이션(7일 주기)으로 세 번 죽었다 — 1차 2일 18시간 / 2차 24시간 23분 / 3차 4일 22시간 23분(2026-08-30 13:08:48 회전 → 09-04 11:31:42 복구). 3차가 1·2차를 합친 것보다 길다.** 알람을 기다리지 말고 [`secret-rotation-bridge.md`](secret-rotation-bridge.md)를 **선제적으로** 수행한다. ⚠️ **3차는 주간 13:08에 났고 탐지 경로도 apply돼 있었는데 5일 넘게 갔다 — 실패한 것은 탐지가 아니라 응답이다.** 그 런북의 **(f)**(알람 도달 실증·창 당일 능동 확인)를 (a)보다 먼저 읽는다. ⚠️ **로테이션은 시각이 아니라 약 24시간짜리 창이다** — **다음 창 = 2026-09-06 09:00 ~ 09-07 08:59:59 KST**(2026-09-04 실측). 실제 창은 브릿지 (a)로 매번 재계산한다
@@ -260,6 +261,85 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 
 ---
 
+## Prometheus 알림 (plan 0015 — Slack만)
+
+규칙 정의(소스오브트루스)는 앱 차트 `deploy/helm/linkpulse/files/rules.yaml`(linkpulse 규칙)과 kube-prometheus-stack 기본 규칙이다. 수신처·라우팅은 `infra/k8s/values/kube-prometheus-stack.yaml.tftpl`. **임계값은 전부 초기값이다.**
+이 알림들은 클러스터 안에서 평가된다 — **클러스터나 Prometheus가 죽으면 조용해진다.** 가용성은 그때도 클러스터 밖 알람(§1·§2·§13)이 본다.
+
+**보는 법**(읽기 전용, 인터넷에 열지 않았다). 각각 다른 터미널 탭에서 띄우고 Ctrl+C로 닫는다.
+
+```bash
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+```
+
+- Prometheus http://localhost:9090/alerts(규칙·발화 상태), Alertmanager http://localhost:9093(묶인 알림·침묵), Grafana http://localhost:3000/d/linkpulse-overview(익명 Viewer — 로그인 없이 본다).
+- 지금 울리는 것: `curl -s localhost:9090/api/v1/alerts | jq -r '.data.alerts[] | select(.state=="firing") | .labels.alertname' | sort | uniq -c`
+- 잠깐 조용히 시키기(배포·드릴 중) **[사람]**: Alertmanager 화면의 Silence. 규칙을 영구히 끄는 것은 코드로 한다(아래 "시끄러운 기본 규칙").
+
+### P-0 알림 경로 시험 / Slack에 안 올 때
+
+- **시험**(측정 창 7-2) **[사람]**: 늘 울리는 시험 규칙을 넣고, Slack에 `LinkpulseTestAlert` 카드가 오면 지운다. 규칙 평가(30초) + Alertmanager 대기(30초)라 보통 2분 안에 온다.
+  ```bash
+  kubectl apply -f infra/k8s/manifests/test-alert-rule.yaml
+  kubectl delete -f infra/k8s/manifests/test-alert-rule.yaml
+  ```
+  `amtool alert add`로 Alertmanager에 직접 넣는 시험은 규칙 평가를 거치지 않아 쓰지 않는다.
+- **안 올 때** 순서: ① Prometheus `/alerts`에 그 알림이 Firing인가(아니면 규칙 문제 — `/api/v1/rules`에서 linkpulse 그룹 `health`가 `ok`인지, 없으면 선택자 계약이 빠졌다) → ② Alertmanager 화면에 들어왔는가 → ③ Alertmanager 로그의 SNS 오류:
+  ```bash
+  kubectl -n monitoring logs alertmanager-kube-prometheus-stack-alertmanager-0 -c alertmanager --tail=100 | grep -iE 'sns|notify|error'
+  ```
+  `AccessDenied`·자격증명 오류면 Pod Identity 연결(`infra/prod` iam.tf `pod_identities.alertmanager`, 서비스 어카운트 `monitoring/alertmanager`)을 본다. 연결은 파드가 뜰 때 붙으므로 연결을 고친 뒤에는 파드를 다시 띄운다 **[사람]** (`kubectl -n monitoring delete pod alertmanager-kube-prometheus-stack-alertmanager-0`).
+  → ④ 발행은 되는데 Slack이 조용하면 Chatbot 쪽이다: 채널 설정의 토픽에 `prom-alerts`가 있는지(`infra/prod` chatbot.tf), "통지가 안 올 때"(부록)를 본다. 메시지 형식이 틀리면 Chatbot이 조용히 버린다 — 형식은 `scripts/check-charts.sh`가 사용자 지정 알림 JSON인지 검사한다.
+
+### P-1 SLO 소진 — `LinkpulseAvailability*Burn`·`LinkpulseLatency*Burn`
+
+- **의미**: 리다이렉트·링크 조회의 5xx 비율(가용성 99.5%) 또는 100ms 초과 비율(지연 99%)이 버짓을 빠르게(14.4배, critical) 또는 느리게(6배, warning) 쓰고 있다. 1시간 요청률이 초당 0.2 미만이면 울리지 않는다.
+- **첫 조치**: 0의 "공통 첫 5분"으로 사용자 영향부터 본다. 그다음 Grafana 대시보드에서
+  - 가용성: "경로별 5xx 비율"이 어느 경로인가 → 앱 5xx라 CloudWatch §3(앱이 낸 5xx)의 원인 분기(DB 연결 실패·회전 직후 등)를 그대로 따른다.
+  - 지연: "p95·p99", "DB 풀 대기", "파드 CPU·스로틀", "HPA 파드 수"를 같은 시간대로 본다. HPA가 최대(6)에 붙어 있으면 `KubeHpaMaxedOut`도 같이 울린다 — 용량 문제다(측정 결과 `load/k6/results/`의 무릎과 비교).
+- ALB가 만든 502·504는 이 SLI에 없다(§2가 본다).
+
+### P-2 클릭 파이프라인 — `LinkpulseClicksDropped`(critical)·`LinkpulseClickPublishErrors`·`LinkpulseClickApplyErrors`
+
+- **유실(Dropped)**: 파드가 큐로 못 보낸 코드가 상한(10만)까지 쌓여 새 클릭을 버리기 시작했다. 대개 SQS 발행이 오래 실패한 끝이다 — 발행 실패 알림이 먼저 와 있어야 한다.
+- **발행 실패 5분 지속**: 파드 로그의 이유를 본다.
+  ```bash
+  kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --prefix --since=15m | grep -E '클릭 발행 실패' | tail -5
+  ```
+  권한(`AccessDenied` → Pod Identity·`infra/prod` iam.tf `pod_app`), 네트워크(NAT·SQS 엔드포인트), 큐 삭제 여부를 차례로 본다. 큐 쪽 적체는 §14(`clicks-oldest-age`)가 같이 본다.
+- **반영 실패**: 워커가 DB에 못 더했다. 메시지는 큐에 남아 다시 오고, 계속 실패하면 DLQ로 간다(§15). DB 상태(§3의 DB 분기, §12 연결 수)를 본다.
+
+### P-3 관리자 인증 실패 — `LinkpulseAdminAuthFailures`
+
+- **의미**: 관리자 경로 401이 10분에 20건을 넘었다. 본인이 비밀번호를 잘못 넣은 것이 아니면 추측 시도다.
+- **첫 조치**: 출처와 경로를 본다(IP는 기록·대화에 붙여 넣지 않는다).
+  ```bash
+  kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --since=15m | grep '"status":401' | jq -r '.path' | sort | uniq -c
+  ```
+  쓰기 경로는 레이트리밋(분당 20)이 이미 막는다. 계속되면 관리자 비밀번호를 바꾼다 **[사람]**: 새 해시를 `infra/k8s/terraform.tfvars`에 넣고 `infra/k8s` apply → `kubectl -n linkpulse rollout restart deploy/linkpulse`(해시 만드는 법은 `infra/k8s/terraform.tfvars.example`).
+
+### P-4 배포 — `LinkpulseArgoCDAppUnhealthy`
+
+- **의미**: ArgoCD Application이 15분 넘게 `Synced`·`Healthy`가 아니다. 사용자 영향은 대개 없다 — 새 파드가 healthy가 되지 않으면 롤링이 멈추고 옛 파드가 남는다.
+- **첫 조치**:
+  ```bash
+  kubectl -n argocd get application linkpulse -o jsonpath='{.status.sync.status}/{.status.health.status}{"\n"}{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}'
+  kubectl -n linkpulse get pods; kubectl -n linkpulse get events --sort-by=.lastTimestamp | tail -15
+  ```
+  새 이미지가 뜨지 않으면(ImagePullBackOff·CrashLoop) R-1로 이전 이미지에 고정한다. 차트 렌더 오류면 `scripts/check-charts.sh`가 main에서 통과하는지 본다.
+
+### 기본 규칙 (kube-prometheus-stack)
+
+- `KubePodCrashLooping`: 파드가 재시작을 반복한다 → `kubectl -n <ns> describe pod <파드>`·`logs --previous`. 앱이면 0-4.
+- `KubeHpaMaxedOut`: HPA가 최대(6)에 15분 넘게 붙어 있다 → 용량 한계. 측정 중이면 정상이다.
+- `TargetDown`: Prometheus가 긁지 못하는 대상이 있다 → `localhost:9090/targets`에서 어느 job인지 본다. 앱이면 9090 포트·ServiceMonitor, 그 밖은 해당 구성 요소.
+- 그 밖(노드 디스크·메모리, Prometheus 자체 등)은 알림의 `runbook_url`(upstream 런북)을 따른다.
+- **시끄러운 기본 규칙**: 측정 창 첫 30분에 본 노이즈는 결과 문서에 이름을 남기고 끈다 — `infra/k8s/values/kube-prometheus-stack.yaml.tftpl`의 `defaultRules.disabled.<알림 이름>: true` → `infra/k8s` apply **[사람]**.
+
+---
+
 ## 부록
 
 ### INSUFFICIENT_DATA 일반 해석
@@ -287,11 +367,13 @@ aws cloudwatch describe-alarm-history --alarm-name <알람명> --history-item-ty
 - **ArgoCD 보기**: 인터넷에 열지 않았다. 상태는 0-4의 `kubectl`로 충분하다. 화면이 필요하면 `kubectl -n argocd port-forward svc/argocd-server 8443:443` → https://localhost:8443, 사용자 `admin`. 초기 비밀번호는 `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d` — **그 출력은 대화·문서에 붙여 넣지 않는다**(클러스터를 지우면 바뀌는 일회용이지만 원칙은 같다).
 - **배포가 반영되지 않을 때**: GHCR에 새 `main`이 올라갔는지(Actions `deploy`) → Image Updater 로그(`kubectl -n argocd logs deploy/argocd-image-updater-controller --tail=50`) → Application의 `image.tag` 파라미터(`kubectl -n argocd get application linkpulse -o jsonpath='{.spec.source.helm.parameters}'`) 순서로 본다. Image Updater를 0개로 줄여 둔 채(R-1)라면 반영되지 않는 게 정상이다.
 - **사이트 값을 바꿀 때**(관리자 해시, 레이트리밋 예외 등): `infra/k8s` apply 뒤 `kubectl -n linkpulse rollout restart deploy/linkpulse` — envFrom은 ConfigMap·Secret 변경을 다시 읽지 않는다. 관리자 해시는 `infra/k8s/terraform.tfvars`에 있다(plan 0014 전에는 `infra/prod/terraform.tfvars`).
-- **생성·삭제 순서**: 생성은 `infra/prod` → `infra/k8s`(컨트롤러 → site(ConfigMap·Secret·TGB) → gitops(Application·ImageUpdater)). 삭제는 역순이고, **Application과 TargetGroupBinding을 각 컨트롤러가 살아 있을 때 먼저 지운다**(finalizer). `scripts/full-apply-prod.sh`·`full-destroy-prod.sh`가 이 순서대로 한다.
+- **생성·삭제 순서**: 생성은 `infra/prod` → `infra/k8s`(kube-prometheus-stack → 컨트롤러 → site(ConfigMap·Secret·TGB) → gitops(Application·ImageUpdater)). 삭제는 역순이고, **Application과 TargetGroupBinding을 각 컨트롤러가 살아 있을 때 먼저 지운다**(finalizer). Prometheus·Alertmanager CR에 finalizer가 있으면 그것도 operator가 살아 있을 때 지운다(plan 0015). `scripts/full-apply-prod.sh`·`full-destroy-prod.sh`가 이 순서대로 한다.
 - **finalizer에 걸려 삭제가 멈췄을 때**(컨트롤러가 먼저 사라짐 — `kubectl get ... ` 결과에 `deletionTimestamp`가 있는데 안 지워짐): 컨트롤러가 다시 살 수 없다면 finalizer를 손으로 뗀다 **[사람]**. 그 경우 컨트롤러가 하던 정리(ArgoCD는 앱 리소스 삭제, LB 컨트롤러는 타깃 등록 해제)가 일어나지 않는다 — 타깃 그룹은 `infra/prod` destroy가 통째로 지우니 남는 것은 없다.
   ```bash
   kubectl -n argocd patch application linkpulse --type merge -p '{"metadata":{"finalizers":null}}'
   kubectl -n linkpulse patch targetgroupbinding linkpulse --type merge -p '{"metadata":{"finalizers":null}}'
+  kubectl -n monitoring patch prometheus kube-prometheus-stack-prometheus --type merge -p '{"metadata":{"finalizers":null}}'
+  kubectl -n monitoring patch alertmanager kube-prometheus-stack-alertmanager --type merge -p '{"metadata":{"finalizers":null}}'
   ```
 
 > 이 runbook은 GameDay(P3-2) 실측으로 검증·갱신된다. 실측과 다른 서술을 발견하면 회고 액션 아이템으로 수정한다.

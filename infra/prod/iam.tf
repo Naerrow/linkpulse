@@ -73,6 +73,11 @@ locals {
       namespace       = "logging"
       service_account = "fluent-bit"
     }
+    # plan 0015: kube-prometheus-stack의 Alertmanager(infra/k8s values alertmanager.serviceAccount.name).
+    alertmanager = {
+      namespace       = "monitoring"
+      service_account = "alertmanager"
+    }
   }
 }
 
@@ -160,4 +165,21 @@ resource "aws_iam_role_policy" "pod_fluent_bit" {
   name   = "fluent-bit"
   role   = aws_iam_role.pod["fluent_bit"].id
   policy = data.aws_iam_policy_document.pod_fluent_bit.json
+}
+
+# Alertmanager: Prometheus 알림 토픽 하나에 발행만 한다(plan 0015). sns:Publish는 topic 리소스 수준 권한을 지원한다
+# (Service Authorization Reference "Amazon SNS" Publish 행, 리소스 유형 topic). SNS 수신기는 Pod Identity 자격증명을 읽는다
+# (Alertmanager v0.34.1 notify/sns/sns.go — access_key가 없으면 aws-sdk-go-v2 기본 체인).
+data "aws_iam_policy_document" "pod_alertmanager" {
+  statement {
+    sid       = "PublishPromAlerts"
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.prom_alerts.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "pod_alertmanager" {
+  name   = "alertmanager"
+  role   = aws_iam_role.pod["alertmanager"].id
+  policy = data.aws_iam_policy_document.pod_alertmanager.json
 }

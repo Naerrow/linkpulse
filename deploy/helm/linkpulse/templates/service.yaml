@@ -15,3 +15,8 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: http
       protocol: TCP
+    # ServiceMonitor가 이 이름으로 긁는다(plan 0015). TargetGroupBinding은 8080만 등록하므로 ALB에 붙지 않는다.
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP

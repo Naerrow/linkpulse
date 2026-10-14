@@ -4,19 +4,23 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Naerrow/linkpulse/app/internal/config"
+	"github.com/Naerrow/linkpulse/app/internal/metrics"
 )
 
 // TestNewServerTimeouts는 newServer가 4개 타임아웃과 주소를 기대값으로 세팅하는지 단언한다.
 // 느린/유휴 연결 방어가 회귀로 사라지지 않게 고정한다.
 func TestNewServerTimeouts(t *testing.T) {
 	cfg := config.Config{Port: "9999"}
-	srv := newServer(cfg, http.NotFoundHandler())
+	srv := newServer(cfg, http.NotFoundHandler(), nil)
 
 	if srv.Addr != ":9999" {
 		t.Errorf("Addr = %q, want %q", srv.Addr, ":9999")
@@ -30,13 +34,66 @@ func TestNewServerTimeouts(t *testing.T) {
 		{"ReadHeaderTimeout", srv.ReadHeaderTimeout, 5 * time.Second},
 		{"ReadTimeout", srv.ReadTimeout, 10 * time.Second},
 		{"WriteTimeout", srv.WriteTimeout, 15 * time.Second},
-		{"IdleTimeout", srv.IdleTimeout, 60 * time.Second},
+		{"IdleTimeout", srv.IdleTimeout, 75 * time.Second},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
 		}
 	}
+	// 값보다 관계가 핵심이다: keep-alive가 ALB 유휴 타임아웃보다 짧거나 같으면 502가 날 수 있다(plan 0015).
+	if srv.IdleTimeout <= albIdleTimeout {
+		t.Errorf("IdleTimeout %v가 ALB 유휴 타임아웃 %v보다 길지 않다", srv.IdleTimeout, albIdleTimeout)
+	}
+}
+
+// TestNewServerCountsNewConnections는 공개 서버의 ConnState 훅이 지표로 이어지는지 본다(plan 0015).
+func TestNewServerCountsNewConnections(t *testing.T) {
+	m := metrics.New()
+	srv := newServer(config.Config{Port: "9999"}, http.NotFoundHandler(), m.ConnState)
+	if srv.ConnState == nil {
+		t.Fatal("ConnState 훅이 없다")
+	}
+	srv.ConnState(nil, http.StateNew)
+	srv.ConnState(nil, http.StateActive)
+	if got := gatherValue(t, m, "linkpulse_http_connections_opened_total"); got != 1 {
+		t.Errorf("새 연결 수 = %v, want 1(StateNew만 센다)", got)
+	}
+}
+
+// TestMetricsServer는 내부 포트 서버가 지표 핸들러를 쓰고, 쓰기 상한이 30초 프로파일보다 긴지 본다.
+func TestMetricsServer(t *testing.T) {
+	m := metrics.New()
+	srv := newMetricsServer(":9090", m.Handler())
+	if srv.Addr != ":9090" {
+		t.Errorf("Addr = %q, want :9090", srv.Addr)
+	}
+	if srv.WriteTimeout <= 30*time.Second {
+		t.Errorf("WriteTimeout %v — pprof 30초 프로파일이 거부된다", srv.WriteTimeout)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "linkpulse_http_connections_opened_total") {
+		t.Errorf("내부 포트 /metrics = %d, 지표 없음", rec.Code)
+	}
+}
+
+// gatherValue는 레이블 없는 지표 하나의 값을 /metrics 본문에서 읽는다.
+func gatherValue(t *testing.T, m *metrics.Metrics, name string) float64 {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if v, ok := strings.CutPrefix(line, name+" "); ok {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				t.Fatalf("%s 값 해석 실패: %q", name, v)
+			}
+			return f
+		}
+	}
+	t.Fatalf("%s가 /metrics에 없다", name)
+	return 0
 }
 
 // fakeShutdowner는 정해 둔 오류를 돌려주는 가짜 서버다.

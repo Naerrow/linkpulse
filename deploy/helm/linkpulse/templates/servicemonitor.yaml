@@ -1,0 +1,18 @@
+{{- if .Values.monitoring.enabled }}
+# Prometheus가 앱 Service의 metrics 포트(9090)를 긁는다(plan 0015). 같은 네임스페이스의 Service만 본다.
+# release 라벨을 넣지 않는다 — 차트는 사이트의 Prometheus 릴리스 이름을 모른다. 사이트가 라벨 없이 고르게 둔다.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "linkpulse.fullname" . }}
+  labels:
+    {{- include "linkpulse.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "linkpulse.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.scrapeInterval }}
+{{- end }}

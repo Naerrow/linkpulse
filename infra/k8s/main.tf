@@ -4,8 +4,11 @@
 # 바뀌어 git(차트)에 넣을 수 없으니, 여기서 이름으로 찾아 클러스터 안 ConfigMap·Secret·TargetGroupBinding으로 넣는다.
 # 앱 자체(deploy/helm/linkpulse)는 ArgoCD가 git에서 배포한다. 이 스택은 앱 차트를 모른다.
 #
-# 순서(depends_on, ADR 0007·docs/runbooks/alarm-response.md):
-#   생성  컨트롤러(LBC·ArgoCD·Image Updater, wait) → site(ConfigMap·Secret·TGB) → gitops(Application·ImageUpdater)
+# 순서(depends_on, ADR 0007·0008·docs/runbooks/alarm-response.md):
+#   생성  kube-prometheus-stack(CRD) → 컨트롤러(LBC·ArgoCD·Image Updater, wait) → site(ConfigMap·Secret·TGB)
+#         → gitops(Application·ImageUpdater)
+#         ArgoCD는 kube-prometheus-stack 뒤다 — ArgoCD 차트는 설치할 때 ServiceMonitor CRD가 있어야 ServiceMonitor를 만든다.
+#         Application도 그 뒤다 — 앱 차트가 ServiceMonitor·PrometheusRule을 렌더한다(values-aws.yaml monitoring.enabled).
 #   삭제  역순. TGB·Application에는 finalizer가 있어 각 컨트롤러가 살아 있을 때 지워져야 한다.
 #         scripts/full-destroy-prod.sh가 terraform destroy 전에 둘을 kubectl delete --wait로 먼저 지운다.
 
@@ -20,6 +23,10 @@ locals {
     argo_cd                      = "10.10.3" # 앱 v3.5.5
     argocd_image_updater         = "1.3.2"   # 앱 v1.3.1 — 설정이 ImageUpdater CR이다(charts/gitops)
     fluent_bit                   = "0.58.3"  # 앱 5.1.3 — EKS Pod Identity 자격증명 지원
+    # 2026-10-14 확인(2주 넘은 것 중 최신, 2026-09-29 게시). operator v0.94.1·Prometheus v3.15.0·Alertmanager v0.34.1.
+    # 올리면 values/kube-prometheus-stack.yaml.tftpl의 확인 항목(Grafana 비밀번호 기본값·SNS 자격증명)과
+    # scripts/schemas/monitoring.coreos.com(같은 버전 CRD로 다시 만든다)·CI promtool 버전을 함께 본다.
+    kube_prometheus_stack = "91.8.2"
   }
 }
 
@@ -40,6 +47,11 @@ data "aws_cloudwatch_log_group" "app" {
   name = "/eks/${local.name_prefix}/app"
 }
 
+# Prometheus 알림 토픽(SMS 구독 없음, Chatbot → Slack). infra/prod monitoring.tf가 만든다.
+data "aws_sns_topic" "prom_alerts" {
+  name = "${local.name_prefix}-prom-alerts"
+}
+
 # ---- 네임스페이스 ----
 # 앱 네임스페이스는 helm의 create_namespace로 만들지 않는다 — 라벨을 붙이지 못한다.
 # 이 라벨이 있어야 LB 컨트롤러가 파드에 readiness gate를 넣고, 롤링 때 새 파드가 ALB에서 healthy가 된 뒤에 옛 파드가 빠진다.
@@ -56,6 +68,33 @@ resource "kubernetes_namespace_v1" "logging" {
   metadata {
     name = "logging"
   }
+}
+
+# 이름은 Pod Identity 연결(infra/prod iam.tf pod_identities.alertmanager)의 키다.
+resource "kubernetes_namespace_v1" "monitoring" {
+  metadata {
+    name = "monitoring"
+  }
+}
+
+# ---- 관측성 (plan 0015, ADR 0008) ----
+# 클러스터 안 Prometheus·Alertmanager·Grafana. AMP·AMG를 쓰지 않는다 — P6·P7(집 k3s)에서 같은 구성을 쓰고,
+# 시간 과금 외 고정 비용을 늘리지 않는다. 값과 그 근거는 values/kube-prometheus-stack.yaml.tftpl에 있다.
+# 알림 규칙·대시보드·앱 ServiceMonitor는 앱 차트에 있다(사이트 무관). 여기는 수집 범위와 알림 수신처(사이트 값)만 정한다.
+resource "helm_release" "kube_prometheus_stack" {
+  name       = "kube-prometheus-stack"
+  repository = "https://prometheus-community.github.io/helm-charts"
+  chart      = "kube-prometheus-stack"
+  version    = local.chart_versions.kube_prometheus_stack
+  namespace  = kubernetes_namespace_v1.monitoring.metadata[0].name
+  wait       = true
+  # CRD 10개와 admission 웹훅 인증서 Job이 기본 5분을 넘길 수 있다.
+  timeout = 600
+
+  values = [templatefile("${path.module}/values/kube-prometheus-stack.yaml.tftpl", {
+    prom_alerts_topic_arn = data.aws_sns_topic.prom_alerts.arn
+    region                = var.region
+  })]
 }
 
 # ---- 컨트롤러 ----
@@ -80,7 +119,8 @@ resource "helm_release" "aws_load_balancer_controller" {
 }
 
 # ArgoCD: 인터넷에 열지 않는다(ClusterIP). 운영자는 kubectl port-forward로 본다.
-# 쓰지 않는 구성 요소는 끈다(dex·notifications, ApplicationSet은 0개) — 노드 2대의 파드 수 한도(노드당 17개) 때문이다.
+# 쓰지 않는 구성 요소는 끈다(dex·notifications, ApplicationSet은 0개) — 노드당 파드 수 한도(17개) 때문이다.
+# 애플리케이션 컨트롤러 지표(argocd_app_info)와 ServiceMonitor를 켠다 — 앱 차트의 동기화 실패 알림이 쓴다(plan 0015).
 resource "helm_release" "argocd" {
   name             = "argocd"
   repository       = "https://argoproj.github.io/argo-helm"
@@ -94,7 +134,13 @@ resource "helm_release" "argocd" {
     dex            = { enabled = false }
     notifications  = { enabled = false }
     applicationSet = { replicas = 0 }
+    controller = {
+      metrics = { enabled = true, serviceMonitor = { enabled = true } }
+    }
   })]
+
+  # ArgoCD 차트는 ServiceMonitor CRD가 클러스터에 있을 때만 ServiceMonitor를 렌더한다(.Capabilities 확인) — 없으면 조용히 빠진다.
+  depends_on = [helm_release.kube_prometheus_stack]
 }
 
 # Image Updater: GHCR의 `main` 태그 다이제스트가 바뀌면 ArgoCD Application의 image 파라미터를 바꾼다(git에 쓰지 않는다).
@@ -110,9 +156,7 @@ resource "helm_release" "argocd_image_updater" {
   depends_on = [helm_release.argocd]
 }
 
-# Fluent Bit: 앱 파드의 stdout(JSON)만 CloudWatch Logs로 보낸다. 다른 네임스페이스·노드 로그는 보내지 않는다(비용).
-# kubernetes 필터의 Merge_Log가 앱 JSON을 최상위 필드로 풀어 ECS 시절 Logs Insights 쿼리(msg·task_id 등)가 그대로 돈다.
-# 로그 그룹은 infra/prod가 만든다(auto_create_group 끔 — IAM에 생성 권한이 없다).
+# Fluent Bit: 앱 파드의 stdout(JSON)만 CloudWatch Logs로 보낸다. 값과 그 근거(G-15 수정 포함)는 values/fluent-bit.yaml.tftpl에 있다.
 resource "helm_release" "fluent_bit" {
   name       = "fluent-bit"
   repository = "https://fluent.github.io/helm-charts"
@@ -121,41 +165,10 @@ resource "helm_release" "fluent_bit" {
   namespace  = kubernetes_namespace_v1.logging.metadata[0].name
   wait       = true
 
-  values = [yamlencode({
-    serviceAccount = { name = "fluent-bit" }
-    resources = {
-      requests = { cpu = "50m", memory = "64Mi" }
-      limits   = { memory = "128Mi" }
-    }
-    config = {
-      inputs  = <<-EOT
-        [INPUT]
-            Name              tail
-            Path              /var/log/containers/*_${local.app_namespace}_*.log
-            multiline.parser  cri
-            Tag               kube.*
-            Mem_Buf_Limit     5MB
-            Skip_Long_Lines   On
-      EOT
-      filters = <<-EOT
-        [FILTER]
-            Name         kubernetes
-            Match        kube.*
-            Merge_Log    On
-            Keep_Log     Off
-            Labels       Off
-            Annotations  Off
-      EOT
-      outputs = <<-EOT
-        [OUTPUT]
-            Name               cloudwatch_logs
-            Match              kube.*
-            region             ${var.region}
-            log_group_name     ${data.aws_cloudwatch_log_group.app.name}
-            log_stream_prefix  pod-
-            auto_create_group  false
-      EOT
-    }
+  values = [templatefile("${path.module}/values/fluent-bit.yaml.tftpl", {
+    app_namespace  = local.app_namespace
+    region         = var.region
+    log_group_name = data.aws_cloudwatch_log_group.app.name
   })]
 }
 
@@ -221,5 +234,6 @@ resource "helm_release" "gitops" {
     helm_release.site,
     helm_release.argocd,
     helm_release.argocd_image_updater,
+    helm_release.kube_prometheus_stack,
   ]
 }

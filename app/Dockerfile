@@ -24,5 +24,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -o /out/server ./cmd/se
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/server /server
 EXPOSE 8080
+# 내부 지표 포트(/metrics·pprof, plan 0015). ALB는 8080만 본다.
+EXPOSE 9090
 USER nonroot:nonroot
 ENTRYPOINT ["/server"]

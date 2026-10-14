@@ -1,0 +1,25 @@
+# 알림 경로 시험용 규칙(plan 0015 측정 창 7-2). Terraform·ArgoCD가 관리하지 않는다 — kubectl로 잠깐 넣고 지운다.
+# 늘 발화하는 규칙(vector(1))이라 rule → Alertmanager → SNS(prom-alerts) → Chatbot → Slack을 한 번에 증명한다.
+# amtool alert add는 Alertmanager에 직접 넣어 규칙 평가를 거치지 않으므로 쓰지 않는다.
+#   넣기: kubectl apply -f infra/k8s/manifests/test-alert-rule.yaml
+#   빼기: kubectl delete -f infra/k8s/manifests/test-alert-rule.yaml
+# 절차와 기대 결과는 docs/runbooks/alarm-response.md P-0이다.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: linkpulse-test-alert
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: linkpulse-test-alert
+spec:
+  groups:
+    - name: linkpulse-test
+      rules:
+        - alert: LinkpulseTestAlert
+          expr: vector(1)
+          labels:
+            severity: warning
+            test: "true"
+          annotations:
+            summary: 알림 경로 시험(늘 울린다)
+            description: 규칙 → Alertmanager → SNS → Chatbot → Slack 경로 시험이다. 도착을 확인했으면 kubectl delete -f infra/k8s/manifests/test-alert-rule.yaml로 지운다.

@@ -45,6 +45,10 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            # 내부 지표 포트(/metrics·pprof). 프로브·ALB는 보지 않는다.
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
           # 사이트 값(DB 주소·비밀번호 출처·큐 URL·관리자 해시 등). 아래 env가 같은 키를 덮어쓴다.
           envFrom:
             - configMapRef:
@@ -54,6 +58,8 @@ spec:
           env:
             - name: APP_PORT
               value: "8080"
+            - name: METRICS_ADDR
+              value: ":{{ .Values.metrics.port }}"
             - name: APP_ENV
               value: production
             # 연결 예산은 HPA 범위와 묶여 있어 사이트가 아니라 차트가 정한다.
