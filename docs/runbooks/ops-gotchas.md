@@ -433,3 +433,63 @@ scripts/check-charts.sh: line 36: printf: write error: Broken pipe
 **해결** — 그 출력은 대화·문서에 붙이지 않았다. 검사는 파일을 지정해서 한다: `terraform fmt -check infra/prod/*.tf infra/k8s/*.tf`.
 
 **재발 방지** — 비밀이 든 디렉터리(`infra/prod`·`infra/k8s`)에서는 `fmt`에 디렉터리나 `-diff`를 주지 않는다. CI는 tfvars가 없어 영향이 없다.
+
+## G-19. `full-apply-prod.sh` 3단계(infra/k8s) plan이 차트 저장소 타임아웃으로 멈췄다
+
+**증상** — plan 0015 측정 창의 처음부터 켜기(2026-10-14). 1단계 infra/prod는 끝났고(94개 생성, 노드 3대 Ready), 3단계 `terraform plan`이 이렇게 끝났다.
+```
+Error: Error locating chart  (helm_release.fluent_bit)
+Unable to locate chart fluent-bit: looks like "https://fluent.github.io/helm-charts" is not a valid chart repository
+or cannot be reached: read tcp …->185.199.109.153:443: read: operation timed out
+```
+
+**원인** — 차트가 아니라 네트워크다. helm 공급자는 plan 때 저장소의 `index.yaml`을 받는다. 그 순간 집 회선에서 GitHub Pages(185.199.108~111.153)로 가는 연결 하나가 읽기 타임아웃이 났다. 바로 뒤에 같은 맥에서 fluent·prometheus-community·argo·eks-charts 네 저장소의 `index.yaml`이 모두 200(0.1초 안팎)이었다.
+
+**해결** — plan에서 멈췄으므로 infra/k8s에는 아무것도 적용되지 않았다. `./scripts/full-apply-prod.sh`를 다시 돌린다. 1단계 plan은 `No changes`여야 한다(그대로 확인 문구를 넣으면 빈 apply다). 변경이 보이면 거기서 멈춘다.
+
+**재발 방지** — 스크립트는 다시 돌려도 안전하다(두 스택 모두 plan → 확인 → apply). 3단계 plan의 저장소 오류는 먼저 `curl -sS -o /dev/null -w '%{http_code}\n' <저장소>/index.yaml`로 접속부터 본다.
+
+## G-20. infra/k8s apply에서 LBC 설치가 "the server is currently unable to handle the request"로 실패했다 — metrics-server 애드온의 깨진 OpenAPI
+
+**증상** — plan 0015 측정 창의 처음부터 켜기(2026-10-14). 3단계 apply에서 Fluent Bit·kube-prometheus-stack·ArgoCD·Image Updater는 만들어졌는데 LBC만 실패했다. 다시 돌려도(LBC 혼자) 같았다.
+```
+Error: installation failed  (helm_release.aws_load_balancer_controller)
+unable to build kubernetes objects from release manifest: error validating "": error validating data:
+the server is currently unable to handle the request
+```
+LBC는 CRD 7개만 남고 Deployment·helm 릴리스 기록·state가 없다(다시 돌리면 새로 만든다).
+
+**원인** — EKS metrics-server 애드온 기본 버전 `v0.9.0-eksbuild.12`가 OpenAPI v2 스펙을 깨진 JSON으로 낸다.
+- `/openapi/v2`를 JSON으로 받으면 200(6.4MB), **protobuf로 받으면 늘 503(0바이트)**이다(`kubectl proxy` + `Accept: application/com.github.proto-openapi.spec.v2@v1.0+protobuf`).
+  API 서버는 합친 스펙을 protobuf로 바꿀 때 gnostic으로 파싱하는데, 같은 파서로 JSON을 돌리면 정의 20개가 `has invalid properties: ArbitraryKeys, SchemaProps, SwaggerSchemaProps`로 실패한다.
+  20개 모두 metrics-server가 합쳐 넣은 정의다(`metrics.k8s.io/v1beta1` 타입, `Duration`, 이름이 겹쳐 `_v2`가 붙은 meta 타입). EKS 확장 API(`com.amazonaws.eks.metrics.v1.*`)는 정상이다.
+- helm(kubectl과 같은 코드)은 v3로 서버 측 필드 검증이 되지 않는 객체를 v2 protobuf로 검증한다. LBC 차트의 `kind: List`(IngressClassParams·IngressClass 묶음)가 그것이라 LBC만 걸렸다 — 그 문서를 빼면 검증이 통과한다.
+- **ArgoCD도 같은 곳에 걸린다.** 클러스터 캐시를 동기화할 때 `LoadOpenAPISchema`(v2 protobuf)가 실패하면 `failed to load open api schema while syncing cluster cache`로 멈춘다(argo-cd v3.5.5 `gitops-engine/pkg/cache/cluster.go`·`pkg/utils/kube/ctl.go`). LBC만 우회하면 앱이 배포되지 않는다.
+- eksbuild.12 이미지는 2026-10-12 21:19 UTC 빌드로 Go 1.27.2, .11은 2026-09-14 빌드로 Go 1.26.6이다(이미지 바이너리 `go version -m`, kube-openapi 같은 버전). 같은 kube-openapi의 `spec.Schema`를 `json.Marshal`하면 Go 1.26.6은 `{"description":…}`, **Go 1.27.2는 `{"ArbitraryKeys":{},"SchemaProps":{…},"SwaggerSchemaProps":{}}`**다 — Go 1.27의 `encoding/json`에서 그 타입의 사용자 정의 직렬화가 적용되지 않는다. 0014(10-13)는 기본 버전이 바뀌기 전이었던 것으로 본다(당시 버전 기록은 없다).
+- 처음엔 kube-prometheus-stack CRD 등록과 겹친 탓으로 잘못 봤다. LBC 혼자 돌려도 같아서 버렸다 — 시각이 겹친다는 것만으로 원인을 정하지 않는다.
+
+**해결** — `infra/prod/eks.tf`의 `addon_version_pins`로 metrics-server를 `v0.9.0-eksbuild.11`에 고정하고, 애드온을 교체한다(`terraform apply -replace='aws_eks_addon.after_nodes["metrics-server"]'` — 이전 버전으로의 in-place 업데이트 허용 여부가 문서에 없어 지우고 다시 만든다). 그 뒤 protobuf v2가 200인지 보고 `full-apply-prod.sh`를 다시 돌린다(1단계 `No changes`, 3단계 `3 to add`).
+
+**재발 방지** — 애드온 기본 버전은 AWS가 예고 없이 바꾼다. 3단계(infra/k8s)에서 검증 오류가 나면 먼저 protobuf v2를 본다.
+```bash
+kubectl proxy --port=18001 & sleep 2; curl -s -o /dev/null -w '%{http_code}\n' -H 'Accept: application/com.github.proto-openapi.spec.v2@v1.0+protobuf' http://127.0.0.1:18001/openapi/v2; kill %1
+```
+고정을 풀거나 올릴 때도 이 값이 200인지 먼저 확인한다.
+
+## G-21. k6 setup의 링크 생성 하나가 18초 멈췄다가 `request timeout` — 요청이 ALB에 닿지 않았다(집 회선)
+
+**증상** — plan 0015 측정 창 4) e3 시작(2026-10-14 05:37:28 UTC). setup이 링크 100개를 만들다 7번째에서 멈췄다.
+```
+level=warning msg="Request Failed" error="Post \"https://lpulse.live/api/links\": request timeout"
+level=error msg="Error: 링크 생성 실패: 0 null …" (05:37:46)
+```
+`run800`이 `setup 실패 — 멈춘다`로 끝났고, 실험 묶음이 `&&`로 이어져 있어 e4·e1b도 돌지 않았다.
+
+**원인** — 서버가 아니라 집 회선 ↔ AWS 구간이다.
+- 그 구간(05:37:00~05:38:30) ALB 접근 로그 54건이 모두 2xx·3xx이고, 링크 생성 6건은 05:37:28에 3~9ms에 201이었다. **멈춘 7번째 요청은 로그에 없다** — 클라이언트가 먼저 끊은 요청도 ALB가 받았다면 460으로 남는다. ALB에 닿지 못했다.
+- 같은 때 HPA가 파드를 3 → 2로 줄였지만(05:37) 원인이 아니다. 종료 중인 파드로 갔다면 ALB에 502·504가 남는다.
+- 같은 날 같은 모양이 두 번 더 있었다: G-19(GitHub Pages `read: operation timed out`), G-20 진단 중 EKS API `read tcp … read: operation timed out`. 이 맥의 집 회선에서 연결 하나가 가끔 멈춘다.
+
+**해결** — `load/k6/capacity.js` setup이 응답을 아예 못 받은 경우(status 0)만 세 번까지 다시 보낸다(1초 간격, `console.warn`으로 남긴다). 그 요청은 ALB에 닿지 않아 링크가 생기지 않았고, 닿았더라도 남는 것은 쓰지 않는 링크 하나다. 닫힌 로컬 포트로 setup을 돌려 3회 재시도 후 실패하는 것을 확인했다. 실패한 e3 파일은 `raw/0015-e3-setupfail/`로 옮기고 e3부터 다시 돌렸다.
+
+**재발 방지** — k6 실패가 서버 쪽인지는 **ALB 접근 로그에 그 요청이 있는지**로 가른다. 없으면 발생기·회선 쪽이다(결과 문서의 판정 0번 — 발생기 한계와 같은 쪽). 부하 중의 같은 실패는 k6 `http_req_failed`에만 잡히고 ALB 5xx에는 없다 — 둘을 나란히 본다.

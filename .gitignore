@@ -39,5 +39,7 @@ docs/postmortems/evidence/
 docs/plans/README.md
 docs/plans/*/review-*
 docs/plans/*/code*
+# 측정 창에서 실행한 명령·이유·통과 기준 개인 기록(운영자 학습용) — 오류의 원인·해결은 ops-gotchas, 절차는 README에 있다
+docs/plans/*/commands-explained.md
 CLAUDE.md
 AGENTS.md

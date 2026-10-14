@@ -155,7 +155,7 @@ curl -s localhost:9090/api/v1/alerts | jq -r '.data.alerts[] | select(.state=="f
 ```
 
 **2) 측정 예외 + SMS 끄기 + ALB 접근 로그 켜기.** IP가 비면 apply까지 가지 않는다. 예외 IP는 `infra/k8s`의 사이트 Secret으로 들어간다.
-envFrom은 Secret 변경을 다시 읽지 않으므로 파드를 다시 띄운다. `infra/prod` apply가 접근 로그 버킷(7일 만료)을 만들고 ALB에 켠다 — plan에 `aws_s3_bucket.alb_logs[0]` 등 5개 생성과 `aws_lb.main` 변경이 보여야 한다.
+envFrom은 Secret 변경을 다시 읽지 않으므로 파드를 다시 띄운다. `infra/prod` apply가 접근 로그 버킷(7일 만료)을 만들고 ALB에 켠다 — plan에 `aws_s3_bucket.alb_logs[0]` 등 5개 생성, `aws_lb.main` 변경, SMS 구독 2개(`alarms_sms[0]`·`canary_use1_sms[0]`) 삭제가 보여야 한다(`5 to add, 1 to change, 2 to destroy`).
 마지막 줄은 ALB가 쓴 시험 파일(`ELBAccessLogTestFile`)이 보이는지다 — 안 보이면 버킷 정책 문제다.
 
 ```bash
