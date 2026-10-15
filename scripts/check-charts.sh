@@ -79,13 +79,24 @@ check "aws → 대시보드 ConfigMap 라벨 grafana_dashboard: \"1\"" 'printf "
 R6=$(helm template linkpulse "$APP" -n linkpulse)
 check "기본값(monitoring 끔) → ServiceMonitor·PrometheusRule·대시보드 없음(CRD 없는 사이트)" '! printf "%s" "$R6" | grep -qE "^kind: (ServiceMonitor|PrometheusRule)" && ! printf "%s" "$R6" | grep -q "grafana_dashboard"'
 
+# plan 0016: 런타임 기본값은 차트 ConfigMap에 두고 사이트 ConfigMap이 덮어쓴다(envFrom은 뒤가 이기고 env는 늘 이긴다).
+DEFCM=$(printf '%s\n' "$R" | awk '/^# Source: linkpulse\/templates\/defaults-configmap.yaml/{f=1} f&&/^---/{f=0} f')
+DEFNAME=$(printf '%s' "$DEFCM" | sed -n 's/^  name: //p' | head -1)
+check "기본값 ConfigMap 이름 = <fullname>-defaults" '[ "$DEFNAME" = "linkpulse-defaults" ]'
+check "기본값 GOMAXPROCS \"1\"·ACCESS_LOG_SAMPLE \"100\"" 'printf "%s" "$DEFCM" | grep -q "^  GOMAXPROCS: \"1\"$" && printf "%s" "$DEFCM" | grep -q "^  ACCESS_LOG_SAMPLE: \"100\"$"'
+check "envFrom 순서: 기본값 → 사이트 ConfigMap → 사이트 Secret" '[ "$(printf "%s" "$DEP" | grep -A6 "envFrom:" | sed -n "s/^ *name: //p" | paste -sd, -)" = "$DEFNAME,linkpulse-site,linkpulse-site-secret" ]'
+check "env에 기본값 키 없음(있으면 사이트가 덮어쓸 수 없다)" '! printf "%s" "$DEP" | grep -qE "name: (GOMAXPROCS|ACCESS_LOG_SAMPLE)$"'
+R7=$(helm template linkpulse "$APP" -f "$APP/values-aws.yaml" --set runtimeDefaults.GOMAXPROCS=2 -n linkpulse)
+sum_of() { printf '%s\n' "$1" | sed -n 's/^ *checksum\/defaults: \([0-9a-f]\{64\}\)$/\1/p'; }
+check "파드 템플릿 checksum/defaults가 기본값을 따라 바뀐다(바뀌면 파드가 다시 뜬다)" '[ -n "$(sum_of "$DEP")" ] && [ -n "$(sum_of "$R7")" ] && [ "$(sum_of "$DEP")" != "$(sum_of "$R7")" ]'
+
 echo "== 알림 규칙·대시보드 =="
 RULES="$APP/files/rules.yaml"
 DASH="$APP/files/dashboard.json"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 check "promtool check rules" 'promtool check rules "$RULES" >/dev/null'
-check "promtool test rules(빠른·느린 소진, 저트래픽, 클릭 유실, 발행 실패, 401, ArgoCD)" 'promtool test rules scripts/rules-test/linkpulse.test.yaml >/dev/null'
+check "promtool test rules(빠른·느린 소진, 저트래픽, 클릭 유실, 발행 실패, 401, ArgoCD·Progressing 제외)" 'promtool test rules scripts/rules-test/linkpulse.test.yaml >/dev/null'
 check "대시보드 JSON 유효·uid 고정" '[ "$(jq -r .uid "$DASH")" = "linkpulse-overview" ]'
 # 패널 쿼리를 기록 규칙으로 감싸 promtool로 문법만 본다(Grafana 변수는 예시 값으로 바꾼다).
 jq '[.panels[].targets[]?.expr] | to_entries | {groups: [{name: "dashboard", rules: [.[] | {record: "dashboard:expr\(.key)", expr: (.value | gsub("\\$__rate_interval"; "1m") | gsub("\\$namespace"; "linkpulse"))}]}]}' "$DASH" >"$TMP/dash-rules.json"
@@ -133,6 +144,8 @@ check "EKS 컨트롤 플레인·kube-proxy ServiceMonitor 없음" '! grep -A3 "^
 check "세 *SelectorNilUsesHelmValues=false → 선택자 {}(모든 네임스페이스의 CR)" '(for k in serviceMonitorSelector podMonitorSelector ruleSelector serviceMonitorNamespaceSelector podMonitorNamespaceSelector ruleNamespaceSelector; do printf "%s" "$PROM" | grep -q "^  $k: {}$" || exit 1; done)'
 check "보관 2일·emptyDir(PVC 없음)·자원 요청" 'printf "%s" "$PROM" | grep -q "retention: \"2d\"" && ! printf "%s" "$PROM" | grep -q volumeClaimTemplate && printf "%s" "$PROM" | grep -A2 "requests:" | grep -q "memory: 1Gi"'
 check "kubelet /metrics/resource 수집(E1 세 번째 출처)" 'grep -q "path: /metrics/resource$" "$K"'
+# ArgoCD 알림이 Progressing을 빼므로(plan 0016) 멈춘 확장·롤링은 이 기본 규칙이 잡는다(런북 P-4).
+check "기본 규칙 KubeDeploymentReplicasMismatch·KubeDeploymentRolloutStuck·KubePodNotReady(멈춘 확장·롤링)" 'grep -q "alert: KubeDeploymentReplicasMismatch$" "$K" && grep -q "alert: KubeDeploymentRolloutStuck$" "$K" && grep -q "alert: KubePodNotReady$" "$K"'
 check "Alertmanager 서비스 어카운트 = infra/prod Pod Identity 키" 'grep -q "serviceAccountName: alertmanager" "$K" && grep -A3 "alertmanager = {" infra/prod/iam.tf | grep -q "service_account = \"alertmanager\""'
 # Alertmanager 설정 Secret을 풀어 amtool로 본다. 템플릿 경로는 임시 디렉터리로 바꾼다.
 am_secret() { awk '/^kind: Secret/{f=1} f&&/^---/{f=0} f' "$K" | sed -n "s/^  $1: \"\(.*\)\"$/\1/p" | head -1 | base64 -d; }

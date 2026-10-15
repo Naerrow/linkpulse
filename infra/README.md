@@ -188,6 +188,9 @@ aws cloudwatch set-alarm-state --alarm-name linkpulse-prod-canary-down --region 
 ### CloudWatch Logs Insights 조회 (로그 그룹 `/eks/linkpulse-prod/app`)
 
 앱은 JSON 구조화 로그(`method`/`path`/`status`/`duration_ms`)를 낸다. Fluent Bit가 앱 JSON을 최상위 필드로 풀고(`Merge_Log`) `kubernetes.pod_name` 등을 더해 보낸다. `task_id`는 파드 이름이다.
+**요청 줄(`msg = "http request"`)은 표본이다**(plan 0016, ADR 0009). 4xx·5xx와 100ms 이상 요청은 늘 남고, 성공·빠른 요청은 1/`ACCESS_LOG_SAMPLE`(차트 기본 100)만 남는다.
+그래서 아래 오류·느린 요청 쿼리는 그대로 맞지만, **요청 수는 로그로 세지 않는다** — ALB `RequestCount`나 Prometheus `linkpulse_http_requests_total`로 본다.
+장애 때 전부 남기려면 런북 R-7.
 ECS 시절 그룹(`/ecs/linkpulse-prod-app`)은 destroy와 함께 사라졌다.
 
 ```

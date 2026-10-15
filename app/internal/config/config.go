@@ -69,6 +69,9 @@ type Config struct {
 	// 클릭 큐(SQS) URL (CLICK_QUEUE_URL, plan 0013). 비면 프로세스 안의 메모리 큐를 쓴다(로컬).
 	// 운영에서는 필수다 — 태스크마다 따로 노는 메모리 큐로 조용히 뜨면 재전달도 없고 종료 때 클릭을 잃는다.
 	ClickQueueURL string
+	// 요청 로그 표본 N (ACCESS_LOG_SAMPLE, 기본 1 = 전부, plan 0016). 성공했고 빠른 요청만 1/N로 남긴다.
+	// 차트 기본값은 100이고 사이트 ConfigMap이 덮어쓴다. 로컬·docker-compose는 기본 1이라 예전과 같다.
+	AccessLogSample int
 	// 잘못돼서 무시한 DB_CONN_MAX_LIFETIME 원문. 비어 있으면 정상이다.
 	// 값이 있으면 기동 로그가 그 사실을 함께 남긴다 — 이 경고를 Load 안에서 바로 찍으면
 	// 구조화 로거 설정 전이라 JSON도 task_id도 붙지 않는다.
@@ -161,6 +164,15 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// 0·음수는 "로그를 끈다"로 읽힐 수 있어 막는다 — 오류·느린 요청 줄까지 사라진 줄 알고 장애 때 헤매지 않게.
+	accessLogSample, err := getEnvInt("ACCESS_LOG_SAMPLE", 1)
+	if err != nil {
+		return Config{}, err
+	}
+	if accessLogSample < 1 {
+		return Config{}, fmt.Errorf("ACCESS_LOG_SAMPLE은 1 이상이어야 합니다(1 = 전부 남김, 현재 %d)", accessLogSample)
+	}
+
 	return Config{
 		Port:            getEnv("APP_PORT", "8080"),
 		MetricsAddr:     getEnv("METRICS_ADDR", ":9090"),
@@ -180,6 +192,7 @@ func Load() (Config, error) {
 		AdminTokenSHA256:        adminHash,
 		RateLimitExemptIPs:      exemptIPs,
 		ClickQueueURL:           clickQueueURL,
+		AccessLogSample:         accessLogSample,
 	}, nil
 }
 

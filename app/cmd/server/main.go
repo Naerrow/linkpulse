@@ -138,6 +138,8 @@ func main() {
 	slog.Info("관리자 기능", "admin_enabled", cfg.AdminTokenSHA256 != nil)
 	// 예외 IP는 개수만 남긴다 — 측정 클라이언트의 집 IP라 로그에 찍지 않는다(plan 0012).
 	slog.Info("레이트리밋", "rate_limit_exempt_count", len(cfg.RateLimitExemptIPs))
+	// 실효 표본값을 남긴다(plan 0016). 이미지에 셸이 없어 파드의 환경 변수를 확인할 다른 길이 없다.
+	slog.Info("요청 로그", "access_log_sample", cfg.AccessLogSample)
 
 	handler := httpapi.NewRouter(httpapi.RouterDeps{
 		Links:            linkSvc,
@@ -146,8 +148,9 @@ func main() {
 		BaseURL:          cfg.PublicBaseURL,
 		Readiness:        readiness,
 		// 예외 IP 외의 한도 필드는 zero-value → 운영 기본값 적용(httpapi/ratelimit.go의 default* 상수).
-		RateLimit: httpapi.RateLimitConfig{ExemptIPs: cfg.RateLimitExemptIPs},
-		Observer:  m,
+		RateLimit:       httpapi.RateLimitConfig{ExemptIPs: cfg.RateLimitExemptIPs},
+		Observer:        m,
+		AccessLogSample: cfg.AccessLogSample,
 	})
 	srv := newServer(cfg, handler, m.ConnState)
 	metricsSrv := newMetricsServer(cfg.MetricsAddr, m.Handler())

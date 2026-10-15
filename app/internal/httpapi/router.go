@@ -21,6 +21,8 @@ type RouterDeps struct {
 	AdminTokenSHA256 []byte
 	// Observer는 요청마다 지표를 받는다(plan 0015). nil이면 지표 없이 로그만 남긴다.
 	Observer RequestObserver
+	// AccessLogSample은 성공·빠른 요청 로그를 1/N로 남기는 N이다(plan 0016). 0·1이면 전부 남긴다.
+	AccessLogSample int
 }
 
 // NewRouter는 애플리케이션의 전체 HTTP 라우팅을 구성해 공통 미들웨어로 감싼 핸들러를 반환한다.
@@ -63,5 +65,5 @@ func NewRouter(d RouterDeps) http.Handler {
 	mux.HandleFunc("GET /{code}", lh.redirect)
 
 	// 리미터 상태 맵은 여기서 1회 생성돼 모든 요청이 공유한다(요청당 재생성 금지).
-	return withMiddleware(d.Observer, newRateLimit(d.RateLimit), mux)
+	return withMiddleware(d.Observer, sampleKeeper(d.AccessLogSample), newRateLimit(d.RateLimit), mux)
 }

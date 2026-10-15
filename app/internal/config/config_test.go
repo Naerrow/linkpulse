@@ -492,6 +492,35 @@ func TestLoadRejectsMalformedAdminHash(t *testing.T) {
 	}
 }
 
+// TestLoadAccessLogSample은 요청 로그 표본 설정을 본다(plan 0016). 비면 1(전부 남김)이고,
+// 0·음수·숫자가 아니면 기동을 막는다 — 0이 "로그 끔"으로 조용히 받아들여지지 않게.
+func TestLoadAccessLogSample(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("APP_ENV", "")
+	t.Setenv("ADMIN_TOKEN_SHA256", "")
+	t.Setenv("RATE_LIMIT_EXEMPT_IPS", "")
+	t.Setenv("CLICK_QUEUE_URL", "")
+	for _, c := range []struct {
+		raw  string
+		want int
+	}{{"", 1}, {"1", 1}, {"100", 100}} {
+		t.Setenv("ACCESS_LOG_SAMPLE", c.raw)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("ACCESS_LOG_SAMPLE=%q: 예상치 못한 에러: %v", c.raw, err)
+		}
+		if cfg.AccessLogSample != c.want {
+			t.Errorf("ACCESS_LOG_SAMPLE=%q → %d, want %d", c.raw, cfg.AccessLogSample, c.want)
+		}
+	}
+	for _, raw := range []string{"0", "-1", "abc", "1.5"} {
+		t.Setenv("ACCESS_LOG_SAMPLE", raw)
+		if _, err := Load(); err == nil {
+			t.Errorf("ACCESS_LOG_SAMPLE=%q인데 Load가 성공함", raw)
+		}
+	}
+}
+
 // testClickQueueURL은 테스트용 SQS 큐 URL이다(계정 ID는 0으로 채운 가짜).
 const testClickQueueURL = "https://sqs.ap-northeast-2.amazonaws.com/000000000000/linkpulse-prod-clicks"
 

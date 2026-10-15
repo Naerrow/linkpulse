@@ -30,7 +30,7 @@ Built and operated as a production service, with a focus on reliability and obse
 - 런타임: EKS(관리형 노드 t4g.medium 3대) · 인그레스: 기존 ALB + TargetGroupBinding(AWS Load Balancer Controller)
 - 데이터: RDS PostgreSQL(마스터 비밀번호는 Secrets Manager가 7일마다 자동 회전) · 큐: SQS
 - CI/CD: GitHub Actions(빌드·테스트·GHCR 푸시) → ArgoCD + Image Updater(GitOps 배포) · 차트: Helm(`deploy/helm/linkpulse`)
-- 관측성: CloudWatch(구조화 로깅·지표·알람, 로그는 Fluent Bit) · 클러스터 안 Prometheus·Grafana(앱 지표, SLO 소진 알림 → Slack, [ADR 0008](docs/adr/0008-in-cluster-prometheus.md))
+- 관측성: CloudWatch(구조화 로깅·지표·알람, 로그는 Fluent Bit) · 클러스터 안 Prometheus·Grafana(앱 지표, SLO 소진 알림 → Slack, [ADR 0008](docs/adr/0008-in-cluster-prometheus.md)) · 요청 로그는 오류·느린 요청 전부 + 나머지 1/100 표본([ADR 0009](docs/adr/0009-runtime-defaults-and-log-sampling.md))
 
 > 진행 단계: **P0~P4 완료(2026-10-07, Redis 캐시만 P5로 이관)** — 클라우드(ECS Fargate) 단독 운영 체계를 갖췄다. **P5 진행 중** — 한계 측정(0012)·클릭 집계 비동기화(0013) 완료, ECS→EKS(0014) 전환.
 > 다음은 **P5 AWS 완성**(Prometheus/Grafana) → **P6 하이브리드**(홈랩 k3s + VPN)

@@ -13,6 +13,11 @@
 # 열어(끝날 때 닫는다) Prometheus 절·카운터 정합성·로그 유실(파드·분당 줄 수) 표를 덧붙인다. 원본 응답은 <이름>-prom.json·
 # -lines.json으로 남기고, 클러스터가 없으면(destroy 뒤 재수집) 그것을 다시 쓴다. 둘 다 없으면(0012~0014) 이 절을 건너뛴다.
 #
+# plan 0016: 로그 양(앱 로그 그룹 IncomingBytes·Logs Insights "http request" 줄 수)과 Fluent Bit CPU·ArgoCD health를 "로그 양·
+# Fluent Bit·ArgoCD" 절로 덧붙인다(요청 로그 표본화·ArgoCD 알림 판정). 그 자료가 하나도 없으면(0012~0015 재수집) 이 절을 건너뛴다.
+# START_OFFSET_S로 비킨 실행(정각 + 30초)은 직전 정각(epoch − 30)을 시작으로 준다 — CloudWatch가 벽시계 분 단위로만 주고,
+# 유지 구간 2분 30초가 벽시계 두 분을 그대로 덮는다(load/k6/README.md 0016 창 절차).
+#
 # 실행이 끝나고 3분쯤 뒤, destroy 전에 돌린다 — 지표·로그가 늦게 들어오고, destroy하면 로그 그룹이 사라진다.
 # 읽기 전용 AWS 호출만 쓴다(describe-load-balancers, get-metric-data, logs start-query/get-query-results).
 # Prometheus에는 읽기(query·query_range)만 한다.
@@ -62,7 +67,7 @@ ALB_ARN=$(aws elbv2 describe-load-balancers --region "$REGION" --names "$PREFIX-
   --query 'LoadBalancers[0].LoadBalancerArn' --output text)
 ALB_DIM=${ALB_ARN#*:loadbalancer/}
 
-jq -n --arg alb "$ALB_DIM" --arg p "$PREFIX" '
+jq -n --arg alb "$ALB_DIM" --arg p "$PREFIX" --arg lg "$LOG_GROUP" '
   def m(id; ns; name; stat; dims):
     {Id: id, MetricStat: {Metric: {Namespace: ns, MetricName: name, Dimensions: dims}, Period: 60, Stat: stat}};
   [{Name: "LoadBalancer", Value: $alb}] as $alb
@@ -84,7 +89,8 @@ jq -n --arg alb "$ALB_DIM" --arg p "$PREFIX" '
       m("rds_wlat"; "AWS/RDS"; "WriteLatency"; "Average"; $rds),
       m("rds_rlat"; "AWS/RDS"; "ReadLatency"; "Average"; $rds),
       m("sqs_age"; "AWS/SQS"; "ApproximateAgeOfOldestMessage"; "Maximum"; $sqs),
-      m("sqs_sent"; "AWS/SQS"; "NumberOfMessagesSent"; "Sum"; $sqs)
+      m("sqs_sent"; "AWS/SQS"; "NumberOfMessagesSent"; "Sum"; $sqs),
+      m("log_bytes"; "AWS/Logs"; "IncomingBytes"; "Sum"; [{Name: "LogGroupName", Value: $lg}])
     ]' > "$TMP/queries.json"
 
 iso() { jq -rn --argjson t "$1" '$t | todate'; }
@@ -129,7 +135,10 @@ insights 'filter msg = "click queue"
 insights 'filter msg = "click queue"
   | stats sum(recorded_clicks) as rec, sum(dropped_clicks) as drp, sum(applied_clicks) as app,
           sum(unknown_clicks) as unk, sum(duplicate_batches) as dups, sum(apply_errors) as aerr' "$TMP/cons.json" "$(date +%s)"
+# 요청 로그 줄 수(plan 0016 판정 (d)). 표본화하면 성공·빠른 요청은 1/N만 남는다 — 요청 수는 지표로 본다.
+insights 'filter msg = "http request" | stats count(*) as n by bin(1m)' "$TMP/req.json"
 cp "$TMP/pool.json" "$RAW-pool.json"
+cp "$TMP/req.json" "$RAW-req.json"
 cp "$TMP/fail.json" "$RAW-fail.json"
 cp "$TMP/cq.json" "$RAW-cq.json"
 cp "$TMP/cons.json" "$RAW-cons.json"
@@ -194,6 +203,16 @@ if [[ -n $PROM ]]; then
     gmp_max "max(go_sched_gomaxprocs_threads{$NSEL})"
     # 파드가 그 분 전체에 살아 있었는가: 직전 긁기를 포함한 75초 창의 up 5번(15초 간격)이 모두 1.
     alive "min_over_time(up{$NSEL}[75s]) and count_over_time(up{$NSEL}[75s]) >= 5"
+    # plan 0016: Fluent Bit CPU(노드마다 파드 하나 — 합과 가장 바쁜 파드), 표본과 무관하게 늘 남는 요청 수(4xx·5xx + 100ms 초과),
+    # ArgoCD health(그 분에 보인 상태마다 시계열 하나)와 LinkpulseArgoCDAppUnhealthy(pending 포함) 시계열 수.
+    # 늘 남는 요청의 항마다 "or vector(0)"을 붙인다 — 4xx·5xx 시계열은 그 코드가 처음 나올 때 생겨서, 없으면 합 전체가 빈다
+    # (-prom.json에는 합만 남아 destroy 뒤 되살릴 수 없다). 5xx이면서 100ms를 넘는 요청은 두 번 세어진다(드물다).
+    fb_cpu "sum(rate(container_cpu_usage_seconds_total{namespace=\"logging\",container=\"fluent-bit\",metrics_path=\"/metrics/cadvisor\"}[1m]))"
+    fb_max "max(sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"logging\",container=\"fluent-bit\",metrics_path=\"/metrics/cadvisor\"}[1m])))"
+    req_total "sum(increase(linkpulse_http_requests_total{$NSEL}[1m]))"
+    req_kept "(sum(increase(linkpulse_http_requests_total{$NSEL,code=~\"[45]..\"}[1m])) or vector(0)) + (sum(increase(linkpulse_http_request_duration_seconds_count{$NSEL}[1m])) or vector(0)) - (sum(increase(linkpulse_http_request_duration_seconds_bucket{$NSEL,le=\"0.1\"}[1m])) or vector(0))"
+    argo_health "max by (name, health_status) (max_over_time(argocd_app_info[1m]))"
+    argo_alert "count(max_over_time(ALERTS{alertname=\"LinkpulseArgoCDAppUnhealthy\"}[1m]))"
   )
   AT=(
     recorded "$(inc linkpulse_clicks_recorded_total)"
@@ -386,7 +405,7 @@ if [[ -r $PROM_RAW ]]; then
     def avgn: map(select(. != null)) | if length == 0 then null else add / length end;
     def sumn: map(select(. != null)) | if length == 0 then null else add end;
     $prom[0] as $P
-    | ([$P | keys[] | select(. != "alive")] | map({key: ., value: series($P[.])}) | from_entries) as $s
+    | ([$P | keys[] | select(. != "alive" and . != "argo_health")] | map({key: ., value: series($P[.])}) | from_entries) as $s
     | ($P.alive.data.result // [] | map({pod: .metric.pod, v: (.values | byminute)})) as $alive
     | ($lines[0].results | map(map({key: .field, value: .value}) | from_entries)
        | map({t: (.["bin(1m)"] | bints), pod: .task_id, msg: .msg, n: (.n | tonumber)})) as $L
@@ -445,3 +464,62 @@ if [[ -r $PROM_RAW ]]; then
         | "유실 의심 칸(파드×분) **\($bad | length)** / 전체 \($all | length) — 0이어야 (c) 통과다. LOG_LEVEL=warn 실행(실험 E3)은 두 줄이 Info라 전부 의심으로 나오는 것이 정상이다." )
   '
 fi
+
+# ---- 로그 양·Fluent Bit·ArgoCD (plan 0016 판정 (b)·(d)) — 자료가 하나라도 있을 때만 덧붙인다 ----
+# 표본화 판정: 줄 수 ≈ 늘 남는 요청 + (요청 − 늘 남는 요청) ÷ N. 요청·늘 남는 요청은 지표(increase라 정수가 아니다)로 센다.
+if [[ -r $PROM_RAW ]]; then cp "$PROM_RAW" "$TMP/prom-in.json"; else echo '{}' > "$TMP/prom-in.json"; fi
+jq -nr --argjson start "$START" --argjson stages "$STAGES_JSON" \
+  --slurpfile cw "$TMP/cw.json" --slurpfile req "$TMP/req.json" --slurpfile prom "$TMP/prom-in.json" '
+  def num: if . == null then null elif type == "number" then . elif . == "NaN" or . == "+Inf" or . == "-Inf" then null else tonumber end;
+  def byminute: map({key: ((.[0] | floor) - 60 | tostring), value: (.[1] | num)}) | from_entries; # 분 끝 평가 → 그 분
+  def series($r): ($r.data.result[0].values // []) | byminute;
+  def bints: .[0:10] + "T" + .[11:19] + "Z" | fromdateiso8601 | tostring;
+  def cwts:
+    if type == "number" then floor | tostring
+    else capture("^(?<dt>[0-9-]{10}T[0-9:]{8})(\\.[0-9]+)?(?<tz>Z|[+-][0-9]{2}:[0-9]{2})$") as $c
+      | ($c.dt + "Z" | fromdateiso8601)
+        - (if $c.tz == "Z" then 0
+           else ($c.tz[1:3] | tonumber) * 3600 + ($c.tz[4:6] | tonumber) * 60
+                | if $c.tz[0:1] == "-" then -. else . end end)
+      | tostring
+    end;
+  def r1: if . == null then null else . * 10 | round / 10 end;
+  def mul($k): if . == null then null else . * $k end;
+  def div($d): if . == null or $d == null or $d == 0 then null else . / $d end;
+  def show: if . == null then "-" else tostring end;
+  def maxn: map(select(. != null)) | max;
+  def avgn: map(select(. != null)) | if length == 0 then null else add / length end;
+  ($cw[0].MetricDataResults | map(select(.Id == "log_bytes")) | first) as $lb
+  | (if $lb == null then {} else [$lb.Timestamps, $lb.Values] | transpose | map({key: (.[0] | cwts), value: .[1]}) | from_entries end) as $bytes
+  | ($req[0].results // [] | map(map({key: .field, value: .value}) | from_entries)
+     | map({key: (.["bin(1m)"] | bints), value: (.n | tonumber)}) | from_entries) as $lines
+  | $prom[0] as $P
+  | (["fb_cpu", "fb_max", "req_total", "req_kept", "argo_alert"] | map({key: ., value: series($P[.] // {})}) | from_entries) as $s
+  | ($P.argo_health.data.result // [] | map({lab: "\(.metric.name // "?"):\(.metric.health_status // "?")", v: (.values | byminute)})) as $H
+  | if ($bytes | length) == 0 and ($lines | length) == 0 and ($s.fb_cpu | length) == 0 and ($H | length) == 0 then empty else
+    [ range(0; $stages | length) as $i | range(1; 3) as $j
+      | ($start + ($i * 3 + $j) * 60 | tostring) as $t
+      | { stage: $stages[$i], t: ($t | tonumber),
+          req: $s.req_total[$t], kept: $s.req_kept[$t], lines: $lines[$t],
+          mb: ($bytes[$t] | div(1000000)),
+          fb: ($s.fb_cpu[$t] | mul(1000)), fbmax: ($s.fb_max[$t] | mul(1000)),
+          health: ([$H[] | select(.v[$t] == 1) | .lab] | join(" ")),
+          alert: ($s.argo_alert[$t] // 0) } ] as $rows
+    | ([range($start; $start + ($stages | length) * 180; 60) | tostring]) as $all
+    | "",
+      "### 로그 양·Fluent Bit·ArgoCD (plan 0016 판정 (b)·(d). 요청은 지표, 줄은 Logs Insights \"http request\", Fluent Bit는 노드 합/가장 바쁜 파드 밀리코어)",
+      "",
+      "| 단계 rps | 분(UTC) | 요청(지표) | 늘 남는 요청(4xx·5xx·100ms 초과) | http request 줄 | 로그 MB | Fluent Bit CPU 합/최대 m | ArgoCD health | ArgoCD 알림 시계열 |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+      ($rows[] | "| \(.stage) | \(.t | todate | .[11:16]) | \(.req | round? // null | show) | \(.kept | round? // null | show) | \(.lines | show) | \(.mb | r1 | show) | \(.fb | r1 | show)/\(.fbmax | r1 | show) | \(if .health == "" then "-" else .health end) | \(.alert) |"),
+      "",
+      "| 단계 rps | 요청/분(지표) | 늘 남는 요청/분 | 줄/분 | 줄 ÷ 요청 % | 로그 MB/분 | Fluent Bit CPU 합 m |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      ($rows | group_by(.stage)[] | . as $g
+       | "| \($g[0].stage) | \($g | map(.req) | avgn | round? // null | show) | \($g | map(.kept) | avgn | round? // null | show) | \($g | map(.lines) | avgn | round? // null | show) | \($g | map(.lines) | avgn | div($g | map(.req) | avgn) | mul(100) | r1 | show) | \($g | map(.mb) | avgn | r1 | show) | \($g | map(.fb) | avgn | r1 | show) |"),
+      "",
+      ( [$H[] | .lab as $l | {lab: $l, n: ([$all[] as $t | select(.v[$t] == 1)] | length)}] as $hm
+        | [$all[] | select(($s.argo_alert[.] // 0) > 0)] as $am
+        | "실행 전체(\($all | length)분): ArgoCD health 분 수 — \(if ($hm | length) == 0 then "자료 없음" else ($hm | map("\(.lab) \(.n)") | join(", ")) end). LinkpulseArgoCDAppUnhealthy(pending 포함)가 있던 분 **\($am | length)** — 0이어야 (b) 통과다." )
+    end
+'
