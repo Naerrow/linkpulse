@@ -1,0 +1,14 @@
+{{- /*
+런타임 기본값(plan 0016). 사이트와 무관한 값이라 차트가 정하고, 사이트 ConfigMap이 같은 키로 덮어쓴다(deployment.yaml envFrom 순서).
+ArgoCD가 소유하므로 창에서 직접 고치지 않는다(selfHeal이 되돌린다). 실험·장애 때는 사이트 ConfigMap을 고친다.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "linkpulse.fullname" . }}-defaults
+  labels:
+    {{- include "linkpulse.labels" . | nindent 4 }}
+data:
+  {{- range $k, $v := .Values.runtimeDefaults }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}

@@ -22,6 +22,16 @@ dbPasswordSecret:
   name: ""
   mountPath: /var/run/secrets/linkpulse
 
+# 런타임 기본값(plan 0016). 차트 ConfigMap <fullname>-defaults로 들어가고, 사이트 ConfigMap이 같은 키를 덮어쓴다.
+# env가 아니라 ConfigMap인 이유: env는 envFrom을 늘 이겨서 사이트가 바꿀 수 없다(장애 때 로그 전부 남기기, 측정 비교 실행).
+runtimeDefaults:
+  # CPU 한도가 250m(1코어 미만)인데 Go 런타임은 기본값을 2 미만으로 두지 않는다(go doc runtime.GOMAXPROCS
+  # "will never set GOMAXPROCS less than 2", 0015 E1 실측 2). 1로 두면 파드 CPU −10~15%(0015 E4).
+  # 한도를 1코어 이상으로 바꾸면 이 값을 다시 정한다.
+  GOMAXPROCS: "1"
+  # 성공·빠른 요청 로그 1/100. 4xx·5xx·100ms 이상은 늘 남는다. 장애 때 사이트 ConfigMap에 "1"을 넣어 전부 남긴다(런북).
+  ACCESS_LOG_SAMPLE: "100"
+
 # 파드 하나의 DB 연결 상한(DB_MAX_OPEN_CONNS).
 # RDS t4g.micro 한도는 약 112, 연결 알람은 80이다. (HPA 최대 6 + 롤링 surge 1) × 11 = 77 < 80.
 # maxReplicas를 바꾸면 이 값도 다시 계산한다.

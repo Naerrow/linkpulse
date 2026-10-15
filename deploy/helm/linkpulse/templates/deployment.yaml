@@ -24,6 +24,9 @@ spec:
     metadata:
       labels:
         {{- include "linkpulse.selectorLabels" . | nindent 8 }}
+      annotations:
+        # 앱은 기동 때만 환경 변수를 읽는다. 기본값이 바뀌면 파드를 다시 띄운다(plan 0016).
+        checksum/defaults: {{ .Values.runtimeDefaults | toJson | sha256sum }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       # 앱은 쿠버네티스 API를 부르지 않는다. Pod Identity는 자기 projected 토큰 볼륨을 따로 넣으므로 영향이 없다.
@@ -49,8 +52,12 @@ spec:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
               protocol: TCP
-          # 사이트 값(DB 주소·비밀번호 출처·큐 URL·관리자 해시 등). 아래 env가 같은 키를 덮어쓴다.
+          # 차트 기본값 → 사이트 값(DB 주소·비밀번호 출처·큐 URL·관리자 해시 등) 순서다. 같은 키는 뒤의 출처가 이기고,
+          # 아래 env는 envFrom을 늘 이긴다(쿠버네티스 API Container.envFrom 설명, k8s.io/api core/v1 types.go).
+          # 그래서 사이트가 기본값을 덮어쓸 수 있다. 기본값 키를 env에 두면 사이트가 바꿀 수 없다(plan 0016).
           envFrom:
+            - configMapRef:
+                name: {{ include "linkpulse.fullname" . }}-defaults
             - configMapRef:
                 name: {{ .Values.site.configMapName }}
             - secretRef:

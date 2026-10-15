@@ -157,7 +157,50 @@ tests:
         exp_alerts:
           - exp_labels: {severity: warning, name: linkpulse}
             exp_annotations:
-              summary: ArgoCD 애플리케이션이 15분 넘게 Synced·Healthy가 아니다
+              summary: ArgoCD 애플리케이션이 15분 넘게 Synced가 아니거나 비정상이다(Progressing 제외)
+              description: linkpulse의 동기화 또는 상태가 15분 동안 정상이 아니다. 새 파드가 뜨지 않으면 롤링이 멈추고 옛 파드가 남는다. 런북 docs/runbooks/alarm-response.md P-4.
+
+  # 8-2. ArgoCD Progressing(plan 0016): HPA 확장 중 6분(0015 실측 모양)은 울리지 않는다.
+  - interval: 1m
+    input_series:
+      - series: 'argocd_app_info{name="linkpulse",sync_status="Synced",health_status="Healthy"}'
+        values: '1x4 _x6 1x20'
+      - series: 'argocd_app_info{name="linkpulse",sync_status="Synced",health_status="Progressing"}'
+        values: '_x4 1x6 _x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: LinkpulseArgoCDAppUnhealthy
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LinkpulseArgoCDAppUnhealthy
+        exp_alerts: []
+
+  # 8-3. Progressing이 30분 이어져도 이 규칙은 울리지 않는다. 멈춘 롤링은 진행 기한(600초) 뒤 Degraded로 바뀌어 8-4로 잡히고,
+  #      멈춘 확장은 kube-prometheus-stack 기본 규칙이 잡는다(rules.yaml 주석).
+  - interval: 1m
+    input_series:
+      - series: 'argocd_app_info{name="linkpulse",sync_status="Synced",health_status="Progressing"}'
+        values: '1x31'
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LinkpulseArgoCDAppUnhealthy
+        exp_alerts: []
+
+  # 8-4. Degraded 15분이면 울린다(Synced여도). 진행 기한을 넘긴 롤링이 이 모양이다.
+  - interval: 1m
+    input_series:
+      - series: 'argocd_app_info{name="linkpulse",sync_status="Synced",health_status="Degraded"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: LinkpulseArgoCDAppUnhealthy
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: LinkpulseArgoCDAppUnhealthy
+        exp_alerts:
+          - exp_labels: {severity: warning, name: linkpulse}
+            exp_annotations:
+              summary: ArgoCD 애플리케이션이 15분 넘게 Synced가 아니거나 비정상이다(Progressing 제외)
               description: linkpulse의 동기화 또는 상태가 15분 동안 정상이 아니다. 새 파드가 뜨지 않으면 롤링이 멈추고 옛 파드가 남는다. 런북 docs/runbooks/alarm-response.md P-4.
 
   # 9. 빠른 소진의 5분 창: 10% 오류가 60분에 멈추면 70분에는 1시간 비율(약 8.5%)이 아직 7.2%를 넘어도 풀린다.
