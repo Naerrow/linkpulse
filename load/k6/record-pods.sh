@@ -4,6 +4,7 @@
 # 사용법: load/k6/record-pods.sh <출력 접두>   (예: load/k6/results/raw/0014-spread)
 #   <접두>-pods.tsv: epoch, 파드, CPU(밀리코어), 메모리(MiB)   — kubectl top pods
 #   <접두>-hpa.tsv:  epoch, 현재 파드 수, 목표 파드 수, HPA CPU %  — kubectl get hpa
+#   <접두>-argo.tsv: epoch, Application health, sync, Deployment·HPA health(plan 0016 — HPA 확장 중 Progressing을 누가 내나)
 # k6를 돌리기 전에 백그라운드로 띄우고, 수집 전에 끈다(kill). collect-metrics.sh가 같은 접두의 파일을 읽는다.
 #
 # metrics-server 값은 CloudWatch에 남지 않는다. Container Insights 대신 이 기록을 쓰고, 0015에서 Prometheus로 정리한다.
@@ -25,5 +26,9 @@ while true; do
   kubectl -n "$NS" get hpa linkpulse \
     -o jsonpath='{.status.currentReplicas}{"\t"}{.status.desiredReplicas}{"\t"}{.status.currentMetrics[0].resource.current.averageUtilization}{"\n"}' 2>/dev/null \
     | awk -v t="$now" -F'\t' 'NF >= 2 { printf "%d\t%d\t%d\t%d\n", t, $1, $2, $3 + 0 }' >> "$OUT-hpa.tsv"
+  kubectl -n argocd get application linkpulse -o json 2>/dev/null \
+    | jq -r --arg t "$now" '[$t, .status.health.status, .status.sync.status,
+        (.status.resources // [] | map(select(.kind == "Deployment" or .kind == "HorizontalPodAutoscaler")
+          | "\(.kind)=\(.health.status // "-")") | join(" "))] | @tsv' >> "$OUT-argo.tsv" || true
   sleep "$INTERVAL"
 done

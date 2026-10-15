@@ -10,6 +10,8 @@
 // 기본은 1600까지다(0012 재현). plan 0013 재측정은 MAX_RPS=3200, plan 0014(EKS·HPA)는 MAX_RPS=6400으로 돌린다.
 // setup이 끝나면 다음 정각(:00초)까지 기다렸다가 시작한다. 그래서 단계마다 유지 구간이
 // CloudWatch의 온전한 1분 두 개를 덮는다(collect-metrics.sh가 이 두 분만 단계 값으로 쓴다).
+// START_OFFSET_S(0~59, 기본 0)를 주면 "다음 정각 + 오프셋"에 시작한다(plan 0016 r0 — 매 분 :00초 정지가 k6 쪽 주기인지 가른다).
+// 30이면 유지 구간 2분 30초가 벽시계 두 분을 그대로 덮으므로 collect-metrics.sh에는 직전 정각(epoch − 30)을 준다.
 import http from 'k6/http';
 import { sleep } from 'k6';
 import { Counter } from 'k6/metrics';
@@ -31,6 +33,10 @@ if (!['spread', 'hot', 'read'].includes(SCENARIO)) {
 const rates = ALL_RATES.filter((r) => r <= MAX_RPS);
 if (rates.length === 0) {
   throw new Error(`MAX_RPS=${MAX_RPS} 이하 단계가 없다`);
+}
+const START_OFFSET_S = Number(__ENV.START_OFFSET_S || 0);
+if (!Number.isInteger(START_OFFSET_S) || START_OFFSET_S < 0 || START_OFFSET_S > 59) {
+  throw new Error('START_OFFSET_S는 0~59 정수여야 한다');
 }
 
 const redirectsOk = new Counter('redirects_302');
@@ -106,12 +112,24 @@ export function setup() {
     codes.push(res.json('code'));
   }
 
-  // 다음 정각까지 기다린다. 시나리오는 setup이 돌아오는 즉시 시작한다.
+  // 다음 (정각 + 오프셋)까지 기다린다. 시나리오는 setup이 돌아오는 즉시 시작한다.
   const now = Date.now();
-  const start = Math.ceil(now / 60000) * 60000;
+  const start = nextStart(now, START_OFFSET_S);
   sleep((start - now) / 1000);
-  console.log(`시나리오 시작 = ${new Date(start).toISOString()} epoch=${start / 1000} — collect-metrics.sh 첫 인자`);
+  if (START_OFFSET_S === 0) {
+    console.log(`시나리오 시작 = ${new Date(start).toISOString()} epoch=${start / 1000} — collect-metrics.sh 첫 인자`);
+  } else {
+    console.log(`시나리오 시작 = ${new Date(start).toISOString()} epoch=${start / 1000} (정각 + ${START_OFFSET_S}초) — ` +
+      `collect-metrics.sh 첫 인자는 ${start / 1000 - START_OFFSET_S}(직전 정각), alb-latency.py에는 ${start / 1000}`);
+  }
   return { codes };
+}
+
+// nextStart는 now(ms) 이후 처음 오는 "정각 + offsetS초"(ms)다. 오프셋 0이면 다음 정각이다(now가 정각이면 now).
+// 예: now 12:00:10, 오프셋 30 → 12:00:30. now 12:00:40, 오프셋 30 → 12:01:30. 오프셋 0 → 12:01:00.
+function nextStart(now, offsetS) {
+  const off = offsetS * 1000;
+  return Math.ceil((now - off) / 60000) * 60000 + off;
 }
 
 function pick(codes) {
