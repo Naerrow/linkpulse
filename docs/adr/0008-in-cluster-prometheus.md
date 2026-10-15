@@ -1,6 +1,6 @@
 # ADR 0008 — 클러스터 안 Prometheus·Grafana, SLO 알림, 알림 등급 분리
 
-- 상태: 채택 (2026-10-14, plan 0015). **측정 창 전** — 수집·알림 경로·Slack 도착은 plan 0015 단계 7(측정 창)에서 확인한다.
+- 상태: 채택 (2026-10-14, plan 0015). **측정 창 통과(2026-10-14·15)** — 수집·규칙·알림 경로(Slack 발화·해소)·카운터 정합성·로그 유실 0을 확인했다. 결과: [`load/k6/results/0015-observability.md`](../../load/k6/results/0015-observability.md).
 - 관련: AGENTS.md §5 P5(0015 Prometheus/Grafana, 자유 이동 원칙), [plan 0015](../plans/0015-prometheus-grafana/plan.md),
   [ADR 0002](0002-alerting-design.md)(CloudWatch 알람·Chatbot), [ADR 0007](0007-ecs-to-eks.md)(EKS·노드 수용).
 
