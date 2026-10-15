@@ -207,6 +207,8 @@ if [[ -n $PROM ]]; then
     # ArgoCD health(그 분에 보인 상태마다 시계열 하나)와 LinkpulseArgoCDAppUnhealthy(pending 포함) 시계열 수.
     # 늘 남는 요청의 항마다 "or vector(0)"을 붙인다 — 4xx·5xx 시계열은 그 코드가 처음 나올 때 생겨서, 없으면 합 전체가 빈다
     # (-prom.json에는 합만 남아 destroy 뒤 되살릴 수 없다). 5xx이면서 100ms를 넘는 요청은 두 번 세어진다(드물다).
+    # 주의(0016 결과): 분 끝의 [1m] 창은 첫·끝 긁기 사이만 세고 약 15초를 외삽한다. 매 분 :00초 정지가 그 틈에 있어
+    # 정지 중 느린 요청을 거의 놓친다 — 이 열과 앱 p99·100ms 초과 %는 정지 밖의 정상 상태로만 읽는다. 정지는 접근 로그로 본다.
     fb_cpu "sum(rate(container_cpu_usage_seconds_total{namespace=\"logging\",container=\"fluent-bit\",metrics_path=\"/metrics/cadvisor\"}[1m]))"
     fb_max "max(sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"logging\",container=\"fluent-bit\",metrics_path=\"/metrics/cadvisor\"}[1m])))"
     req_total "sum(increase(linkpulse_http_requests_total{$NSEL}[1m]))"
@@ -507,7 +509,7 @@ jq -nr --argjson start "$START" --argjson stages "$STAGES_JSON" \
           alert: ($s.argo_alert[$t] // 0) } ] as $rows
     | ([range($start; $start + ($stages | length) * 180; 60) | tostring]) as $all
     | "",
-      "### 로그 양·Fluent Bit·ArgoCD (plan 0016 판정 (b)·(d). 요청은 지표, 줄은 Logs Insights \"http request\", Fluent Bit는 노드 합/가장 바쁜 파드 밀리코어)",
+      "### 로그 양·Fluent Bit·ArgoCD (plan 0016 판정 (b)·(d). 요청은 지표, 줄은 Logs Insights \"http request\", Fluent Bit는 노드 합/가장 바쁜 파드 밀리코어. 늘 남는 요청(지표)은 매 분 :00초 정지를 놓친다 — 표본 공식은 로그로 나눠 확인한다)",
       "",
       "| 단계 rps | 분(UTC) | 요청(지표) | 늘 남는 요청(4xx·5xx·100ms 초과) | http request 줄 | 로그 MB | Fluent Bit CPU 합/최대 m | ArgoCD health | ArgoCD 알림 시계열 |",
       "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
