@@ -54,6 +54,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
 | R-4 | 로그 조회 | CloudWatch Logs Insights, 그룹 `/eks/linkpulse-prod/app`(Fluent Bit) — 쿼리 모음은 `infra/README.md`. 지금 막 뜨는 로그는 `kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --prefix --since=15m --tail=200` |
 | R-5 | 타깃 헬스 확인 | `aws elbv2 describe-target-health --region ap-northeast-2 --target-group-arn $(aws elbv2 describe-target-groups --names linkpulse-prod-tg --query 'TargetGroups[0].TargetGroupArn' --output text --region ap-northeast-2)` — 타깃은 파드 IP다. 등록이 안 되면 LB 컨트롤러: `kubectl -n linkpulse describe targetgroupbinding linkpulse`, `kubectl -n kube-system logs deploy/aws-load-balancer-controller --tail=50` |
 | R-6 | 죽은 파드의 사인(死因) | `kubectl -n linkpulse describe pod <pod>`의 `Last State`(Reason·Exit Code: `OOMKilled`/137=메모리, 1=앱 에러) → `kubectl -n linkpulse logs <pod> --previous`. 이미지 문제면 이벤트에 `ImagePullBackOff`(GHCR 패키지가 공개인지, 태그가 있는지) |
+| R-7 | **[사람]** 요청 로그 전부 남기기 | 요청 줄은 평소 표본이다(성공·빠른 요청 1/100, plan 0016). 성공 요청까지 봐야 하면 `kubectl -n linkpulse patch configmap linkpulse-site --type merge -p '{"data":{"ACCESS_LOG_SAMPLE":"1"}}'` → R-3. 끝나면 `-p '{"data":{"ACCESS_LOG_SAMPLE":null}}'` → R-3(차트 기본값으로 돌아간다). 차트 ConfigMap `linkpulse-defaults`는 고치지 않는다 — ArgoCD가 되돌린다. 로그 양이 약 100배 늘어 Fluent Bit CPU도 는다 |
 
 ①: `kubectl -n argocd scale deploy/argocd-image-updater-controller --replicas=0` — 멈추지 않으면 다음 주기에 `main` 다이제스트로 다시 덮어쓴다.
 ②: `kubectl -n argocd patch application linkpulse --type merge -p '{"spec":{"source":{"helm":{"parameters":[{"name":"image.tag","value":"<위 tag 값 또는 git sha>"}]}}}}'` — ArgoCD가 곧바로 롤링한다. `kubectl -n linkpulse rollout status deploy/linkpulse`로 끝을 본다.
@@ -103,6 +104,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
   fields @timestamp, status, method, path, duration_ms | filter status >= 500 | sort @timestamp desc | limit 50
   ```
   panic이면: `filter msg = "panic recovered"`. RDS 알람 동반(0-3)이면 DB 쪽(§9–§12) 먼저.
+  요청 로그는 표본이지만 4xx·5xx는 늘 남는다 — 이 쿼리는 표본과 무관하다. 요청 수·오류율은 로그가 아니라 지표로 본다(R-7).
 - **원인 → 복구**:
   1. **직전 배포가 원인**(배포 시각과 5xx 시작 일치): **R-1**.
   2. **DB 연결 실패/고갈**: 로그에 connection 계열 에러 → §12 확인, RDS 상태 `aws rds describe-db-instances --db-instance-identifier linkpulse-prod-pg --query 'DBInstances[0].DBInstanceStatus' --region ap-northeast-2`.
@@ -141,7 +143,7 @@ Slack에 알람 카드가 오면 **이 문서를 위에서부터** 따라간다.
   ```
   fields @timestamp, path, status, duration_ms | filter duration_ms > 1000 | sort duration_ms desc | limit 50
   ```
-  앱 포화인지는 `kubectl -n linkpulse top pods`·`kubectl -n linkpulse get hpa`(파드 CPU가 한도 250m에 붙고 HPA가 최대 6이면 앱 포화), §9/§12(RDS) 동반이면 DB 병목.
+  100ms 이상 요청은 표본과 무관하게 늘 남는다(R-7). 앱 포화인지는 `kubectl -n linkpulse top pods`·`kubectl -n linkpulse get hpa`(파드 CPU가 한도 250m에 붙고 HPA가 최대 6이면 앱 포화), §9/§12(RDS) 동반이면 DB 병목.
 - **복구**: 원인별 — 특정 쿼리(인덱스·N+1)면 코드 수정, 전반 포화면 HPA 상한·파드 CPU(차트 values, PR → ArgoCD)를 올린다. 단 연결 예산(§12)을 같이 다시 계산한다. DB면 §9.
 - **튜닝**: 실트래픽 관측 후 임계 재설정(ADR 0002 — 초기값).
 
@@ -318,11 +320,14 @@ kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
   ```bash
   kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --since=15m | grep '"status":401' | jq -r '.path' | sort | uniq -c
   ```
-  쓰기 경로는 레이트리밋(분당 20)이 이미 막는다. 계속되면 관리자 비밀번호를 바꾼다 **[사람]**: 새 해시를 `infra/k8s/terraform.tfvars`에 넣고 `infra/k8s` apply → `kubectl -n linkpulse rollout restart deploy/linkpulse`(해시 만드는 법은 `infra/k8s/terraform.tfvars.example`).
+  401은 표본과 무관하게 늘 로그에 남는다(R-7). 쓰기 경로는 레이트리밋(분당 20)이 이미 막는다. 계속되면 관리자 비밀번호를 바꾼다 **[사람]**: 새 해시를 `infra/k8s/terraform.tfvars`에 넣고 `infra/k8s` apply → `kubectl -n linkpulse rollout restart deploy/linkpulse`(해시 만드는 법은 `infra/k8s/terraform.tfvars.example`).
 
 ### P-4 배포 — `LinkpulseArgoCDAppUnhealthy`
 
-- **의미**: ArgoCD Application이 15분 넘게 `Synced`·`Healthy`가 아니다. 사용자 영향은 대개 없다 — 새 파드가 healthy가 되지 않으면 롤링이 멈추고 옛 파드가 남는다.
+- **의미**: ArgoCD Application이 15분 넘게 `Synced`가 아니거나, health가 `Healthy`·`Progressing`이 아니다(`Degraded`·`Missing`·`Unknown` 등). 사용자 영향은 대개 없다 — 새 파드가 healthy가 되지 않으면 롤링이 멈추고 옛 파드가 남는다.
+  - `Progressing`은 뺐다(plan 0016). HPA가 파드를 늘리는 동안 Deployment가 `Progressing`이 된다(새 파드가 Available이 될 때까지, gitops-engine `health_deployment.go`). 0015 측정 2시간 중 6분이었다.
+  - **멈춘 롤링은 그래도 잡힌다**: 진행 기한(차트에 `progressDeadlineSeconds`가 없어 기본 600초)이 지나면 Deployment 조건이 `ProgressDeadlineExceeded`가 되고 ArgoCD가 `Degraded`로 본다 → 15분 뒤 이 알림. 최악 약 25분이다. 기본 규칙 `KubeDeploymentRolloutStuck`이 그보다 먼저 울린다.
+  - **멈춘 확장(롤링이 끝난 뒤 늘린 파드가 Pending)은 이 알림이 잡지 않는다** — 진행 기한 검사를 받지 않아 `Progressing`에 머문다. 기본 규칙 `KubeDeploymentReplicasMismatch`·`KubePodNotReady`가 잡는다(아래 "기본 규칙").
 - **첫 조치**:
   ```bash
   kubectl -n argocd get application linkpulse -o jsonpath='{.status.sync.status}/{.status.health.status}{"\n"}{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}'
@@ -334,6 +339,8 @@ kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
 
 - `KubePodCrashLooping`: 파드가 재시작을 반복한다 → `kubectl -n <ns> describe pod <파드>`·`logs --previous`. 앱이면 0-4.
 - `KubeHpaMaxedOut`: HPA가 최대(6)에 15분 넘게 붙어 있다 → 용량 한계. 측정 중이면 정상이다.
+- `KubeDeploymentReplicasMismatch`·`KubePodNotReady`: 원하는 파드 수만큼 Available이 아니다 / 파드가 Ready가 되지 않는다(15분). HPA가 늘린 파드가 Pending이면 이것이 잡는다(P-4는 `Progressing`을 빼서 못 잡는다) → `kubectl -n linkpulse get pods`·`describe pod`의 이벤트(자원 부족이면 노드 수·요청 합).
+- `KubeDeploymentRolloutStuck`: 롤링이 진행 기한(600초)을 넘겼다 → P-4 첫 조치와 같다.
 - `TargetDown`: Prometheus가 긁지 못하는 대상이 있다 → `localhost:9090/targets`에서 어느 job인지 본다. 앱이면 9090 포트·ServiceMonitor, 그 밖은 해당 구성 요소.
 - 그 밖(노드 디스크·메모리, Prometheus 자체 등)은 알림의 `runbook_url`(upstream 런북)을 따른다.
 - **시끄러운 기본 규칙**: 측정 창 첫 30분에 본 노이즈는 결과 문서에 이름을 남기고 끈다 — `infra/k8s/values/kube-prometheus-stack.yaml.tftpl`의 `defaultRules.disabled.<알림 이름>: true` → `infra/k8s` apply **[사람]**.

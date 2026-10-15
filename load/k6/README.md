@@ -66,7 +66,7 @@ burst 단계에서는 그 IP에서 링크를 열면 429가 날 수 있다. 1분 
 | `read` | 링크 100개에 `GET /api/links/{code}`(쓰기 없음) | 대조군. 쓰기를 뺀 상한 |
 
 - 단계: **50 → 100 → 200 → 400 → 800 → 1600 rps**, 단계마다 30초 램프 + 2분 30초 유지. 한 번에 최대 18분이고, 시작 전에 정각까지 최대 1분 기다린다.
-  `MAX_RPS`로 단계를 자른다(로컬 검증은 100).
+  `MAX_RPS`로 단계를 자른다(로컬 검증은 100). `START_OFFSET_S`(0~59, 기본 0)를 주면 시작을 "정각 + 오프셋"으로 비킨다(plan 0016 r0).
 - 안전 정지: 오류율 5%, p95 1초, 429 1건. 임계값은 누적값이라 **단계 판정은 `collect-metrics.sh`의 표로 한다.**
 - `collect-metrics.sh`는 단계마다 램프가 섞인 첫 1분을 빼고 유지 구간의 온전한 2분만 쓴다. 읽기 전용 AWS 호출만 한다.
 - 원자료(k6 CSV·실행 로그·수집 표)는 `load/k6/results/raw/`에 둔다(gitignore). 결과 문서는 `load/k6/results/0012-baseline.md`.
@@ -107,13 +107,13 @@ unset ADMIN_TOKEN; docker compose down
 
 ### 운영 측정 [사람]
 
-측정 창은 약 4시간이다(plan 0015 단계 7 — P5 종결을 겸한다. 0014의 창(회전 드릴 포함)과 0012·0013의 ECS 절차는 git 이력에 있다).
+측정 창은 약 2시간 30분이다(plan 0016 단계 7 — 0016 기본값·ArgoCD 알림·매 분 :00초 정지·요청 로그 표본화. 0015의 창(실험 E1~E4·세 시나리오 재측정·알림 경로 시험)과 0014·0012·0013의 절차는 git 이력에 있다).
 집 IP는 화면·로그·문서 어디에도 찍지 않는다. **ALB 접근 로그에는 클라이언트(집) IP가 들어 있다** — 원자료(`raw/`, gitignore)에만 두고 붙여 넣지 않는다.
 명령 블록에는 주석을 넣지 않았다 — zsh 대화형 셸은 `#`을 인자로 넘긴다(ops-gotchas G-3). 설명은 블록 밖에 둔다.
-모든 블록은 저장소 루트에서, **main을 받아 둔 상태**로 실행한다(측정 코드·차트·tf 변수가 main에 있어야 한다).
-단계마다 확인 지점이 있다. 걸리면 거기서 멈춘다(알림 경로만 예외 — 아래 1-2).
+모든 블록은 저장소 루트에서, **main을 받아 둔 상태**로 실행한다(측정 코드·차트가 main에 있어야 하고, 차트 기본값은 머지로 배포된다).
+단계마다 확인 지점이 있다. 걸리면 거기서 멈춘다.
 
-**1) 인프라 켜기(GHCR `main` 이미지, 처음부터).** 스크립트가 확인 문구를 두 번 묻고, ArgoCD 동기화·롤아웃·헬스체크까지 기다린다. 이 한 번이 P5 종결의 "처음부터 재현" 확인이다.
+**1) 인프라 켜기(GHCR `main` 이미지, 처음부터).** 스크립트가 확인 문구를 두 번 묻고, ArgoCD 동기화·롤아웃·헬스체크까지 기다린다.
 
 ```bash
 ./scripts/full-apply-prod.sh
@@ -127,31 +127,16 @@ aws ec2 describe-instance-credit-specifications --region ap-northeast-2 --instan
 kubectl get pods -A | grep -vE 'Running|Completed'
 ```
 
-**1-2) 모니터링 확인(plan 0015 7-2).** Prometheus를 다른 탭에서 띄워 둔다(`kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090`). 그다음 이 블록을 돈다.
-- 대상: 모두 `up`이어야 한다 — 앱 파드 2·ArgoCD·kube-state-metrics·node-exporter 3·kubelet(cAdvisor·resource)·apiserver·coredns·operator·Prometheus·Alertmanager·Grafana.
-- 규칙: linkpulse 그룹 4개(`linkpulse-slo`·`-clicks`·`-admin`·`-argocd`)가 `ok`여야 한다. 없으면 선택자 계약이 빠진 것이다 — 멈춘다.
-- 공개 `/metrics`는 **404**여야 한다(판정 (a)). Fluent Bit 설정에 세 줄(`storage.type filesystem`·`DB`·`Rotate_Wait 30`)이 있어야 한다.
+**1-2) 모니터링·기본값 확인(plan 0016 7-1).** Prometheus를 다른 탭에서 띄워 둔다(`kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090`) — 4)의 확인 줄도 이 포트를 쓴다. 그다음 이 블록을 돈다.
+- 규칙: linkpulse 그룹 4개(`linkpulse-slo`·`-clicks`·`-admin`·`-argocd`)가 `ok`여야 한다.
+- 차트 기본값 ConfigMap `linkpulse-defaults`에 `{"ACCESS_LOG_SAMPLE":"100","GOMAXPROCS":"1"}`이 있어야 한다.
+- 앱 파드마다 `go_sched_gomaxprocs_threads`가 **1**이고, 기동 로그의 `access_log_sample`이 **100**이어야 한다. 아니면 기본값이 파드에 닿지 않은 것이다 — 멈춘다.
 
 ```bash
-curl -s localhost:9090/api/v1/targets | jq -r '.data.activeTargets[] | "\(.health) \(.labels.job)"' | sort | uniq -c
 curl -s localhost:9090/api/v1/rules | jq -r '.data.groups[] | select(.name | startswith("linkpulse")) | "\(.name) \([.rules[].health] | unique | join(","))"'
-curl -s -o /dev/null -w 'public /metrics %{http_code}\n' https://lpulse.live/metrics
-kubectl -n logging get cm fluent-bit -o jsonpath='{.data.fluent-bit\.conf}' | grep -E 'storage.type|Rotate_Wait|DB '
-```
-
-**알림 경로 시험(판정 (d)).** 늘 울리는 시험 규칙을 넣는다. 2분 안에 Slack에 `FIRING LinkpulseTestAlert · warning (1)` 카드가 오면 지운다(지운 뒤 `RESOLVED` 카드가 한 번 더 온다).
-안 오면 `docs/runbooks/alarm-response.md` P-0 순서로 본다. **Slack 도착이 끝내 안 되면 측정은 하고, 알림 경로는 결과에 실패로 남긴다**(측정과 독립이다).
-
-```bash
-kubectl apply -f infra/k8s/manifests/test-alert-rule.yaml
-kubectl delete -f infra/k8s/manifests/test-alert-rule.yaml
-```
-
-**기본 규칙 노이즈(30분).** 1-2를 마친 뒤 30분 동안 Slack을 보고, 그 끝에 지금 울리는 알림을 적는다(`Watchdog`은 늘 울리고 Slack에는 오지 않는다 — 정상).
-EKS에 맞지 않아 시끄러운 규칙은 이름을 결과에 남긴다(끄는 것은 다음 PR — runbook "시끄러운 기본 규칙"). Grafana는 `kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80` → http://localhost:3000/d/linkpulse-overview 에서 그려지는지 본다.
-
-```bash
-curl -s localhost:9090/api/v1/alerts | jq -r '.data.alerts[] | select(.state=="firing") | .labels.alertname' | sort | uniq -c
+kubectl -n linkpulse get configmap linkpulse-defaults -o jsonpath='{.data}{"\n"}'
+curl -s localhost:9090/api/v1/query --data-urlencode 'query=go_sched_gomaxprocs_threads{namespace="linkpulse"}' | jq -r '.data.result[] | "\(.metric.pod) GOMAXPROCS=\(.value[1])"'
+kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --prefix --tail=-1 | grep -o '"access_log_sample":[0-9]*'
 ```
 
 **2) 측정 예외 + SMS 끄기 + ALB 접근 로그 켜기.** IP가 비면 apply까지 가지 않는다. 예외 IP는 `infra/k8s`의 사이트 Secret으로 들어간다.
@@ -164,16 +149,14 @@ B=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'linkpulse-prod-a
 ```
 
 **3) 확인.** IP가 아니라 개수만 찍힌다. 다시 띄운 파드는 `rate_limit_exempt_count`가 1이어야 한다.
-`set_sensitive`라 plan에서는 값이 가려진다 — 이 기동 로그가 실제 확인이다.
 
 ```bash
 kubectl -n linkpulse logs -l app.kubernetes.io/name=linkpulse --prefix --tail=200 | grep -E 'rate_limit_exempt_count|"db pool"|지표 서버' | tail -6
 ```
 
-**3-1) 클릭 파이프라인 스모크 + 로그 필드 확인.** 링크 하나에 리다이렉트 3번 → 15초 뒤 통계의 클릭이 3이어야 한다(배치가 다른 파드의 워커에서 몇 초 늦게 반영될 수 있다).
-그리고 Fluent Bit가 앱 JSON을 최상위 필드로 풀었는지 Logs Insights로 본다 — 결과에 `pods`(파드 수)가 숫자로 나와야 한다.
-`302 302 302`·`3`·`pods` 숫자가 아니면 측정하지 않고 멈춘다(큐·IAM·워커·로그 중 하나가 막혔다 — `alarm-response.md` §14).
-마지막 줄은 Fluent Bit의 재시도·일시정지·유실·오류 줄 수다. 0이 아니면 `grep -iE` 로 그 줄을 직접 본다(G-15 — 0015부터 파일 시스템 버퍼라 `paused`가 나오면 안 된다).
+**3-1) 클릭 파이프라인 스모크 + 로그 필드 확인.** 링크 하나에 리다이렉트 3번 → 15초 뒤 통계의 클릭이 3이어야 한다.
+Logs Insights 결과에 `pods`(파드 수)가 숫자로 나와야 한다. `302 302 302`·`3`·`pods` 숫자가 아니면 측정하지 않고 멈춘다(`alarm-response.md` §14).
+마지막 줄은 Fluent Bit의 재시도·일시정지·유실·오류 줄 수다. 0이 아니면 `grep -iE` 로 그 줄을 직접 본다(G-15).
 
 ```bash
 read -rs "ADMIN_TOKEN?관리자 토큰: "; echo
@@ -184,89 +167,87 @@ Q=$(aws logs start-query --region ap-northeast-2 --log-group-name /eks/linkpulse
 kubectl -n logging logs -l app.kubernetes.io/name=fluent-bit --tail=-1 | grep -ciE 'retry|paused|drop|error'
 ```
 
-**4) 요청당 CPU 실험 E1~E4(plan 0015).** `SCENARIO=spread MAX_RPS=800`(15분)을 네 번 한다. 한 셸에서 블록 전체를 붙여 넣는다(약 1시간 30분).
-- `e1` 기준 실행 — E1(CPU 세 출처 비교, 수집 표의 Prometheus 절)과 E2(800 단계 유지 구간에 파드 하나의 30초 CPU 프로파일)를 함께 본다. GOMAXPROCS 실제 값도 수집 표에 나온다.
-- `e3` `LOG_LEVEL=warn` — 요청 로그 경로의 비용. `click queue`·`db pool` 줄도 Info라 사라진다. **그 실행의 로그 기반 표(정합성·풀·로그 줄 수)는 비어 나오는 것이 정상이다** — 정합성은 Prometheus 절로 본다.
-- `e4` `GOMAXPROCS=1`(로그는 info로 되돌린다) — CPU 한도 250m 아래의 스케줄러·스로틀 비용. 비교 대상은 `e1`에서 본 실제 GOMAXPROCS 값이다.
-- `e1b` 원래 설정으로 되돌린 기준 재실행 — 되돌림 확인과 같은 창 안의 실행 간 차이.
-- 사이트 ConfigMap은 `infra/k8s`가 소유해 ArgoCD selfHeal이 되돌리지 않는다. 실험 사이에 고치고 파드를 다시 띄운다. 마지막 실험 뒤에는 원래대로다(destroy로도 사라진다).
-- 실행마다 파드 2개에서 시작한다(HPA 축소 안정화 5분을 기다린다). 프로파일은 `raw/0015-<이름>-cpu.pb.gz`에 남는다.
+**발생기 CPU 기록(판정 0번).** 4) 전에 **다른 터미널 탭**에서 켜 두고, 4)가 끝나면 Ctrl+C로 멈춘다. 10초 남짓마다 시각·맥 전체 CPU %·k6 CPU %(코어 1개 = 100)를 한 줄씩 적는다.
+
+```bash
+L=/Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0016-cpu.log; sysctl -n hw.ncpu > $L; while true; do printf '%s %s %s\n' "$(date -u +%s)" "$(top -l 2 -n 0 -s 1 | awk '/CPU usage/ {u=$3; s=$5} END {print u+s}')" "$(ps -A -o %cpu=,comm= | awk '$2 ~ /k6$/ {s+=$1} END {print s+0}')" >> $L; sleep 8; done
+```
+
+**4) 실행 r0 → r1 → r2(plan 0016 설계 4).** `SCENARIO=spread MAX_RPS=3200`(50 → 3200 7단계, 21분)을 세 번 한다. 한 셸에서 블록 전체를 붙여 넣는다(약 1시간 30분).
+
+| 실행 | k6 시작 | 사이트 ConfigMap 덮어쓰기 | 보는 것 |
+| --- | --- | --- | --- |
+| `r0` | **정각 + 30초**(`START_OFFSET_S=30`) | `GOMAXPROCS=2`, `ACCESS_LOG_SAMPLE=1` | 0015와 같은 설정. 정지가 :30(k6 기준 :00)으로 옮겨 가면 발생기 쪽, :00에 남으면 서버·AWS 쪽 |
+| `r1` | 정각 | `ACCESS_LOG_SAMPLE=1` | `GOMAXPROCS`만 1(기본값). r0과 비교해 CPU·지연 |
+| `r2` | 정각 | 없음 | 0016 기본값(요청 로그 1/100). r1과 비교해 로그 줄 수·Fluent Bit CPU |
+
+- **실험은 사이트 ConfigMap(`linkpulse-site`)만 고친다.** 그것은 `infra/k8s`가 소유해 ArgoCD selfHeal이 되돌리지 않는다. 차트 ConfigMap `linkpulse-defaults`를 고치면 ArgoCD가 곧 되돌린다.
+  같은 키는 사이트 ConfigMap이 차트 기본값을 이긴다. merge patch의 `null`은 그 키를 지운다(차트 기본값으로 돌아간다). 순서가 덮어쓰기를 하나씩 지우므로 마지막(r2)이 기본값이다 — 되돌리는 단계가 따로 없다.
+- **확인 한 줄**: 파드를 다시 띄운 뒤 모든 앱 파드의 `go_sched_gomaxprocs_threads`(r0 2, r1·r2 1)와 사이트 ConfigMap의 두 키를 찍는다. 기대값과 다르면 그 실행을 하지 않고 멈춘다.
+  `rollout status`는 옛 파드가 종료를 시작할 때 끝나지만, 옛 파드는 preStop 10초 + 종료 동안 계속 긁힌다. 그래서 10초마다 최대 90초까지 다시 묻는다(그동안은 옛 값이 섞인다).
+- **r0의 오프셋과 수집 시작**: CloudWatch는 벽시계 분 단위로만 준다. 30초 비킨 단계는 램프가 정각에 끝나 유지 구간 2분 30초가 벽시계 두 분을 그대로 덮는다.
+  그래서 `collect-metrics.sh`에는 직전 정각(`epoch − 30`)을 주고(블록이 `S − S % 60`으로 계산한다), `alb-latency.py`에는 실제 epoch를 준다.
+- 실행마다 함께 도는 것: `record-pods.sh`(파드 CPU·HPA·**ArgoCD health와 Deployment·HPA 리소스 health**, 30초), `goroutine-snap.sh`(3200 단계 유지 구간의 :00·:30 + 0.2초 고루틴 스냅숏, 가장 오래된 파드 하나).
+- 수집 뒤 **정지 초의 앱 쪽 시간**을 Logs Insights로 받는다(3200 유지 구간, 앱 로그 `time`의 초별 `duration_ms` p99·최대·건수 → `-appsec.json`). destroy하면 로그 그룹이 사라지므로 여기서 받는다.
+  r0·r1은 모든 요청이 로그에 남는다. r2는 표본이라 성공·빠른 요청이 1/100만 남는다(정지 초 판단에는 r0·r1을 쓴다).
+  `time`은 앱이 줄을 쓴 시각(응답 직전)이다. 결과가 0줄이면(쿼리 실패) 창이 끝나기 전에 `substr(time, 17, 2)`를 `datefloor(@timestamp, 1s)`로 바꿔 다시 묻는다 — Fluent Bit가 읽은 시각이라 버퍼만큼 늦을 수 있다.
+- 실행마다 파드 2개에서 시작한다(HPA 축소 안정화 5분을 기다린다).
 
 ```bash
 ulimit -n 10240
-P=0015; R=/Users/parkjaehee/mini-project/linkpulse/load/k6; LG=/eks/linkpulse-prod/app
-read -rs "ADMIN_TOKEN?관리자 토큰: "; echo
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN_TOKEN" https://lpulse.live/api/admin/links); echo "토큰 확인: $CODE"
-restart() { kubectl -n linkpulse rollout restart deploy/linkpulse && kubectl -n linkpulse rollout status deploy/linkpulse; }
-run800() {
-  local N=$1 L=$R/results/raw/$P-$1 REC PROF
-  until [[ "$(kubectl -n linkpulse get hpa linkpulse -o jsonpath='{.status.currentReplicas}')" == 2 ]]; do echo "파드 2개로 줄기를 기다린다"; sleep 30; done
-  echo "$N 시작 ($(date -u +%H:%M:%S))"
-  $R/record-pods.sh $L & REC=$!
-  ( until grep -q 'epoch=' $L.log 2>/dev/null; do sleep 5; done
-    S=$(grep -o 'epoch=[0-9]*' $L.log | cut -d= -f2); sleep $(( S + 760 - $(date +%s) ))
-    POD=$(kubectl -n linkpulse get pods -l app.kubernetes.io/name=linkpulse -o jsonpath='{.items[0].metadata.name}')
-    kubectl -n linkpulse port-forward pod/$POD 16060:9090 >/dev/null 2>&1 & PF=$!; sleep 3
-    curl -s -o $L-cpu.pb.gz "http://127.0.0.1:16060/debug/pprof/profile?seconds=30"; kill $PF; echo "$N 프로파일 저장 $(wc -c < $L-cpu.pb.gz)바이트" ) & PROF=$!
-  ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e SCENARIO=spread -e MAX_RPS=800 --out csv=$L.csv.gz $R/capacity.js 2>&1 | tee $L.log
-  grep -q 'epoch=' $L.log || { kill $REC $PROF; echo "$N setup 실패 — 멈춘다"; return 1; }
-  wait $PROF; sleep 180; kill $REC
-  $R/collect-metrics.sh "$(grep -o 'epoch=[0-9]*' $L.log | cut -d= -f2)" $L.csv.gz 800 $LG > $L-metrics.md && echo "$N 수집 완료"
-}
-[[ $CODE == 200 ]] && run800 e1 \
-  && kubectl -n linkpulse patch configmap linkpulse-site --type merge -p '{"data":{"LOG_LEVEL":"warn"}}' && restart && run800 e3 \
-  && kubectl -n linkpulse patch configmap linkpulse-site --type merge -p '{"data":{"LOG_LEVEL":"info","GOMAXPROCS":"1"}}' && restart && run800 e4 \
-  && kubectl -n linkpulse patch configmap linkpulse-site --type json -p '[{"op":"remove","path":"/data/GOMAXPROCS"}]' && restart && run800 e1b
-kubectl -n linkpulse get configmap linkpulse-site -o jsonpath='{.data.LOG_LEVEL} {.data.GOMAXPROCS}{"\n"}'
-```
-
-마지막 줄은 `info `(GOMAXPROCS 없음)여야 한다. 프로파일 상위 10개는 창이 끝난 뒤 로컬에서 본다(판정 (e)) — Go 프로파일은 심볼을 품고 있어 바이너리가 필요 없다.
-
-```bash
-for e in e1 e3 e4 e1b; do echo "== $e"; go tool pprof -top -nodecount=10 load/k6/results/raw/0015-$e-cpu.pb.gz 2>/dev/null | tail -11; done
-```
-
-**5) 재측정 — 세 시나리오를 한 창에서(P5 종결).** 한 셸에서 블록 전체를 붙여 넣는다. 6400까지 8단계라 실행마다 24분, 셋에 약 1시간 45분이다. 4)의 셸을 그대로 써도 된다(`P`·`R`·`LG`·토큰이 남아 있다).
-- **실행마다 파드 2개에서 시작한다.** 기본 설정(위 마지막 줄 `info `)이다.
-- 수집 표에 CloudWatch 절과 Prometheus 절(파드 CPU 세 출처·스로틀·연결당 요청·**카운터 정합성**·**로그 줄 수**)이 함께 나온다.
-- 실행이 끝나면 3분 기다렸다가 수집한다(지표·로그가 늦게 들어온다). 카운터 정합성은 수집 시각이 아니라 teardown의 `DB 클릭 합계` 줄 시각 + 30초에 평가한다. HPA 축소(부하가 떨어지고 약 5분 뒤)보다 앞이라, 수집이 늦어 늘어난 파드가 지워졌어도 판정이 같다.
-- setup이 실패하면(시작 epoch 줄이 없으면) 거기서 멈춘다. 대개 예외 IP가 안 맞아 링크 생성이 429로 막힌 것이다.
-- `ulimit -n 10240`: macOS 기본 256개로는 VU 500개의 연결을 못 연다. 그러면 발생기 오류가 서버 한계처럼 보인다. 명령은 절대경로로 써서 어느 디렉터리에서 붙여 넣어도 된다(ops-gotchas G-13).
-
-```bash
-ulimit -n 10240
-P=0015; M=6400; R=/Users/parkjaehee/mini-project/linkpulse/load/k6; LG=/eks/linkpulse-prod/app
+P=0016; M=3200; R=/Users/parkjaehee/mini-project/linkpulse/load/k6; LG=/eks/linkpulse-prod/app
 [[ -n "$ADMIN_TOKEN" ]] || { read -rs "ADMIN_TOKEN?관리자 토큰: "; echo; }
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ADMIN_TOKEN" https://lpulse.live/api/admin/links); echo "토큰 확인: $CODE"
-[[ $CODE == 200 ]] && for S in spread hot read; do
-  until [[ "$(kubectl -n linkpulse get hpa linkpulse -o jsonpath='{.status.currentReplicas}')" == 2 ]]; do echo "파드 2개로 줄기를 기다린다"; sleep 30; done
-  echo "$S 시작 파드 수 2 ($(date -u +%H:%M:%S))"
-  $R/record-pods.sh $R/results/raw/$P-$S & REC=$!
-  ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e SCENARIO=$S -e MAX_RPS=$M --out csv=$R/results/raw/$P-$S.csv.gz $R/capacity.js 2>&1 | tee $R/results/raw/$P-$S.log
-  grep -q 'epoch=' $R/results/raw/$P-$S.log || { kill $REC; echo "$S setup 실패 — 멈춘다"; break; }
-  sleep 180
-  kill $REC
-  echo "$S Fluent Bit 경고 $(kubectl -n logging logs -l app.kubernetes.io/name=fluent-bit --tail=-1 | grep -ciE 'retry|paused|drop|error')건"
-  $R/collect-metrics.sh "$(grep -o 'epoch=[0-9]*' $R/results/raw/$P-$S.log | cut -d= -f2)" $R/results/raw/$P-$S.csv.gz $M $LG > $R/results/raw/$P-$S-metrics.md && echo "$S 수집 완료"
-done
+site() { kubectl -n linkpulse patch configmap linkpulse-site --type merge -p "{\"data\":$1}"; }
+two() { until [[ "$(kubectl -n linkpulse get hpa linkpulse -o jsonpath='{.status.currentReplicas}')" == 2 ]]; do echo "파드 2개로 줄기를 기다린다"; sleep 30; done; }
+restart() { kubectl -n linkpulse rollout restart deploy/linkpulse && kubectl -n linkpulse rollout status deploy/linkpulse; }
+verify() {
+  local got
+  for _ in $(seq 9); do
+    sleep 10
+    got=$(curl -s localhost:9090/api/v1/query --data-urlencode 'query=go_sched_gomaxprocs_threads{namespace="linkpulse"}' | jq -r '[.data.result[].value[1]] | unique | join(",")')
+    [[ $got == "$1" ]] && break
+  done
+  echo "확인: GOMAXPROCS=$got(기대 $1) · 사이트 ConfigMap $(kubectl -n linkpulse get configmap linkpulse-site -o jsonpath='GOMAXPROCS={.data.GOMAXPROCS} ACCESS_LOG_SAMPLE={.data.ACCESS_LOG_SAMPLE}')"
+  [[ $got == "$1" ]] || { echo "기대값과 다르다 — 멈춘다"; return 1; }
+}
+run() {
+  local N=$1 L=$R/results/raw/$P-$1 REC SNAP S Q
+  echo "$N 시작 ($(date -u +%H:%M:%S))"
+  $R/record-pods.sh $L & REC=$!
+  ( until grep -q 'epoch=' $L.log 2>/dev/null; do sleep 5; done; $R/goroutine-snap.sh $L "$(grep -o 'epoch=[0-9]*' $L.log | cut -d= -f2)" 3200 ) & SNAP=$!
+  ADMIN_TOKEN="$ADMIN_TOKEN" k6 run -e SCENARIO=spread -e MAX_RPS=$M -e START_OFFSET_S=$2 --out csv=$L.csv.gz $R/capacity.js 2>&1 | tee $L.log
+  grep -q 'epoch=' $L.log || { kill $REC $SNAP; echo "$N setup 실패 — 멈춘다"; return 1; }
+  wait $SNAP; sleep 180; kill $REC
+  S=$(grep -o 'epoch=[0-9]*' $L.log | cut -d= -f2)
+  $R/collect-metrics.sh $(( S - S % 60 )) $L.csv.gz $M $LG > $L-metrics.md && echo "$N 수집 완료"
+  Q=$(aws logs start-query --region ap-northeast-2 --log-group-name $LG --start-time $(( S + 1110 )) --end-time $(( S + 1260 )) --query-string 'filter msg = "http request" | fields substr(time, 17, 2) as ss | stats pct(duration_ms, 99) as p99, max(duration_ms) as mx, count(*) as n by ss | sort ss' --query queryId --output text)
+  for _ in $(seq 60); do st=$(aws logs get-query-results --region ap-northeast-2 --query-id "$Q" --query status --output text); [[ $st == Complete || $st == Failed ]] && break; sleep 3; done
+  aws logs get-query-results --region ap-northeast-2 --query-id "$Q" > $L-appsec.json && echo "$N 앱 쪽 초별 시간 $(jq '.results | length' $L-appsec.json)줄"
+}
+[[ $CODE == 200 ]] && two && site '{"GOMAXPROCS":"2","ACCESS_LOG_SAMPLE":"1"}' && restart && verify 2 && run r0 30 \
+  && two && site '{"GOMAXPROCS":null,"ACCESS_LOG_SAMPLE":"1"}' && restart && verify 1 && run r1 0 \
+  && two && site '{"ACCESS_LOG_SAMPLE":null}' && restart && verify 1 && run r2 0
+kubectl -n linkpulse get configmap linkpulse-site -o jsonpath='GOMAXPROCS={.data.GOMAXPROCS} ACCESS_LOG_SAMPLE={.data.ACCESS_LOG_SAMPLE}{"\n"}'
 unset ADMIN_TOKEN MYIP
 ```
 
-**발생기 CPU 기록(판정 0번).** 4) 전에 **다른 터미널 탭**에서 켜 두고, 5)가 끝나면 Ctrl+C로 멈춘다. 10초 남짓마다 시각·맥 전체 CPU %·k6 CPU %(코어 1개 = 100)를 한 줄씩 적는다.
+마지막 줄은 `GOMAXPROCS= ACCESS_LOG_SAMPLE=`(두 키 없음 = 차트 기본값)이어야 한다.
+
+**5) ALB 접근 로그 내려받기·초 단위 분석·고루틴 요약.** ALB는 로그를 5분 단위로 전달한다 — **마지막 요청 뒤 5분 넘게 기다린 다음** 받는다. 읽기만 한다.
+- `alb-latency.py`: 실행마다 초별 p99·정지/정지 밖 p99·정지 앞뒤 100ms 도착(판정 (a) 꼬리·(c)). r0은 k6 기준 표도 나온다. 클라이언트 IP를 찍지 않는다.
+- `goroutines.py`: 스냅숏마다 처리 중 요청이 어디서 기다리는지(실행 대기·DB 연결·DB 응답·로그 쓰기·응답 쓰기·기타, 판정 (c)).
+- 분류(`alb-errors.py`)는 실패 요청이 있을 때 본다.
 
 ```bash
-L=/Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0015-cpu.log; sysctl -n hw.ncpu > $L; while true; do printf '%s %s %s\n' "$(date -u +%s)" "$(top -l 2 -n 0 -s 1 | awk '/CPU usage/ {u=$3; s=$5} END {print u+s}')" "$(ps -A -o %cpu=,comm= | awk '$2 ~ /k6$/ {s+=$1} END {print s+0}')" >> $L; sleep 8; done
+R=/Users/parkjaehee/mini-project/linkpulse/load/k6; D=$R/results/raw
+B=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'linkpulse-prod-alb-logs-')].Name" --output text) && aws s3 sync "s3://$B" $D/0016-alb-logs --only-show-errors && du -sh $D/0016-alb-logs
+for N in r0 r1 r2; do python3 -I $R/alb-latency.py $D/0016-alb-logs "$(grep -o 'epoch=[0-9]*' $D/0016-$N.log | cut -d= -f2)" $D/0016-$N-prom.json 3200 > $D/0016-$N-alb-latency.md && echo "== $N" && awk '/### 요약 — 벽시계/{f=1;next} f&&/^\|/{print;t=1;next} t{exit}' $D/0016-$N-alb-latency.md; done
+python3 -I $R/goroutines.py $D/0016-r*-gr-*.txt
+python3 -I $R/alb-errors.py $D/0016-alb-logs > $D/0016-alb-errors.md; head -2 $D/0016-alb-errors.md
 ```
 
-**6) ALB 접근 로그 내려받기·분류(판정 (f)).** ALB는 로그를 5분 단위로 전달한다 — **마지막 요청 뒤 5분 넘게 기다린 다음** 받는다. 읽기만 한다.
-6400 세 실행이면 압축으로 1GB 남짓이다. 분류 결과(`0015-alb-errors.md`)에는 클라이언트 IP가 없다 — 결과 문서에는 이것만 옮긴다.
-
-```bash
-B=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, 'linkpulse-prod-alb-logs-')].Name" --output text) && aws s3 sync "s3://$B" /Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0015-alb-logs --only-show-errors && du -sh /Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0015-alb-logs
-python3 -I /Users/parkjaehee/mini-project/linkpulse/load/k6/alb-errors.py /Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0015-alb-logs > /Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0015-alb-errors.md; head -2 /Users/parkjaehee/mini-project/linkpulse/load/k6/results/raw/0015-alb-errors.md
-```
-
-**7) 끄기.** 수집·내려받기가 다 끝난 뒤에 한다(destroy하면 로그 그룹·Prometheus·접근 로그 버킷이 지워진다). `Destroy complete!`까지 컴퓨터를 끄지 않는다(ops-gotchas G-9).
+**6) 끄기.** 수집·내려받기가 다 끝난 뒤에 한다(destroy하면 로그 그룹·Prometheus·접근 로그 버킷이 지워진다). `Destroy complete!`까지 컴퓨터를 끄지 않는다(ops-gotchas G-9).
 스크립트가 두 스택의 state가 비었는지 확인한다.
 
 ```bash
@@ -276,7 +257,9 @@ python3 -I /Users/parkjaehee/mini-project/linkpulse/load/k6/alb-errors.py /Users
 실행마다 남는 것: `load/k6/results/raw/<P>-<이름>.log`(k6 요약·`DB 클릭 합계`), `.csv.gz`, `-metrics.md`(수집 표),
 `-cw.json`·`-pool.json`·`-fail.json`·`-cq.json`·`-cons.json`(AWS 원본 응답 — destroy 뒤에도 표를 다시 만들 수 있다),
 `-prom.json`·`-lines.json`(plan 0015, Prometheus 응답·파드별 로그 줄 수 — 클러스터가 없어도 수집 표의 Prometheus 절을 다시 만든다),
-`-pods.tsv`·`-hpa.tsv`(EKS, 파드 CPU·HPA 30초 기록), 실험은 `-cpu.pb.gz`(CPU 프로파일). 창 전체로 `0015-alb-logs/`·`0015-alb-errors.md`·`0015-cpu.log`.
+`-pods.tsv`·`-hpa.tsv`(EKS, 파드 CPU·HPA 30초 기록), 0015 실험은 `-cpu.pb.gz`(CPU 프로파일).
+plan 0016부터 `-req.json`(분당 요청 로그 줄 수), `-argo.tsv`(ArgoCD health·리소스 health 30초 기록), `-gr-<epoch>.txt`·`-gr.tsv`(고루틴 스냅숏),
+`-appsec.json`(3200 유지 구간 앱 쪽 초별 시간), `-alb-latency.md`(초 단위 분석). 창 전체로 `<P>-alb-logs/`·`<P>-alb-errors.md`·`<P>-cpu.log`.
 
 클릭 정합성:
 - **0012(동기 집계):** "302 수 > DB 합계"일 때만 유실로 본다. abort로 끝난 실행은 진행 중 요청이 끊겨 DB 합계가 더 클 수 있다.
