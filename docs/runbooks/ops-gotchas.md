@@ -447,6 +447,10 @@ or cannot be reached: read tcp …->185.199.109.153:443: read: operation timed o
 
 **해결** — plan에서 멈췄으므로 infra/k8s에는 아무것도 적용되지 않았다. `./scripts/full-apply-prod.sh`를 다시 돌린다. 1단계 plan은 `No changes`여야 한다(그대로 확인 문구를 넣으면 빈 apply다). 변경이 보이면 거기서 멈춘다.
 
+**재발(2026-10-15, plan 0016 측정 창 2)** — 측정 예외 apply(`terraform -chdir=infra/k8s apply -var rate_limit_exempt_ips=…`)에서 같은 증상이 argo-helm 저장소로 났다(`helm_release.argocd`, `185.199.110.153:443 read: operation timed out`).
+바꾸려던 것은 `helm_release.site` 하나였지만 helm 공급자는 모든 릴리스의 차트 저장소를 읽는다 — 그중 하나만 끊겨도 멈춘다.
+적용된 것은 없었다: site helm 리비전 1 그대로, 사이트 Secret에 `RATE_LIMIT_EXEMPT_IPS` 키 없음, 접근 로그 버킷 없음(`&&`로 이어져 뒤 명령이 돌지 않았다). 바로 뒤 네 저장소 `index.yaml` 모두 200(0.04~0.24초). 같은 명령을 다시 돌렸다.
+
 **재발 방지** — 스크립트는 다시 돌려도 안전하다(두 스택 모두 plan → 확인 → apply). 3단계 plan의 저장소 오류는 먼저 `curl -sS -o /dev/null -w '%{http_code}\n' <저장소>/index.yaml`로 접속부터 본다.
 
 ## G-20. infra/k8s apply에서 LBC 설치가 "the server is currently unable to handle the request"로 실패했다 — metrics-server 애드온의 깨진 OpenAPI
@@ -493,3 +497,14 @@ level=error msg="Error: 링크 생성 실패: 0 null …" (05:37:46)
 **해결** — `load/k6/capacity.js` setup이 응답을 아예 못 받은 경우(status 0)만 세 번까지 다시 보낸다(1초 간격, `console.warn`으로 남긴다). 그 요청은 ALB에 닿지 않아 링크가 생기지 않았고, 닿았더라도 남는 것은 쓰지 않는 링크 하나다. 닫힌 로컬 포트로 setup을 돌려 3회 재시도 후 실패하는 것을 확인했다. 실패한 e3 파일은 `raw/0015-e3-setupfail/`로 옮기고 e3부터 다시 돌렸다.
 
 **재발 방지** — k6 실패가 서버 쪽인지는 **ALB 접근 로그에 그 요청이 있는지**로 가른다. 없으면 발생기·회선 쪽이다(결과 문서의 판정 0번 — 발생기 한계와 같은 쪽). 부하 중의 같은 실패는 k6 `http_req_failed`에만 잡히고 ALB 5xx에는 없다 — 둘을 나란히 본다.
+
+## G-22. 측정 중 고루틴 스냅숏이 하나도 남지 않았다 — 새 스크립트에 실행 권한이 없었다
+
+**증상** — plan 0016 측정 창(2026-10-15) r0·r1·r2 세 실행이 다 끝났는데 `raw/0016-r*-gr-*.txt`(3200 단계 고루틴 스냅숏)가 하나도 없었다. 다른 원자료(수집 표·`-argo.tsv`·`-appsec.json`)는 모두 있었다.
+
+**원인** — `load/k6/goroutine-snap.sh`가 git 모드 `100644`(실행 권한 없음)로 커밋됐다. README 4) 블록은 이것을 백그라운드 서브셸에서 `$R/goroutine-snap.sh …`로 부른다 — `permission denied`가 백그라운드 출력에 한 줄 섞여 지나갔고, 블록은 `wait`에서 그냥 끝났다.
+`shellcheck`·`bash -n`은 통과했다. 실행 권한은 문법 검사로 잡히지 않는다. 같은 블록의 `record-pods.sh`·`collect-metrics.sh`는 예전부터 `100755`라 돌았다.
+
+**해결** — `chmod +x load/k6/goroutine-snap.sh`(git이 `mode change 100644 => 100755`로 본다). 같은 창에서 실제 클러스터에 대고 한 번 돌려 스냅숏 5개가 남는 것을 확인했다.
+
+**재발 방지** — 새 실행 스크립트는 **실제로 한 번 실행해 본다**(문법 검사만으로 끝내지 않는다). 커밋 전에 `git ls-files -s load/k6/*.sh scripts/*.sh`로 모드가 `100755`인지 본다.
