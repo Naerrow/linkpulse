@@ -106,6 +106,7 @@ cd app && ADMIN_TOKEN_SHA256=c91cbbedf8c712e8e2b7517ddeca8fe4fde839ebd8339e0b200
 AWS(ap-northeast-2) EKS 배포의 상세 런북은 [`infra/README.md`](infra/README.md)에 있습니다. 요약:
 
 - `infra/bootstrap` → state용 S3 버킷, `infra/prod` → AWS 리소스(VPC·ALB·EKS·RDS·SQS·IAM), `infra/k8s` → 클러스터 안(kube-prometheus-stack·LB 컨트롤러·ArgoCD·Fluent Bit·사이트 값).
+- 집 사이트(P6): `infra/home`(Proxmox VM)·`infra/home/ansible`(k3s·PostgreSQL)·`infra/home-aws`(Roles Anywhere·집 큐)·`infra/home-k8s` — 같은 이미지·같은 차트에 `values-home.yaml`([`home-site.md`](docs/runbooks/home-site.md), [ADR 0010](docs/adr/0010-home-site.md)).
 - **모든 `apply`는 사람이 직접**, **Terraform 1.10+** 필요(S3 네이티브 lockfile, DynamoDB 미사용).
 - 순서: bootstrap apply → prod apply → k8s apply → ArgoCD가 앱을 동기화. 켜고 끄기는 `scripts/full-apply-prod.sh`·`full-destroy-prod.sh`.
 - **이미지는 CI가 GHCR에 올리고 배포는 ArgoCD가**, `terraform apply`는 인프라만 담당합니다(경계: [ADR 0007](docs/adr/0007-ecs-to-eks.md)).
