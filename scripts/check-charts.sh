@@ -6,6 +6,8 @@
 #   3. 사이트 차트(infra/k8s/charts/site-aws, gitops): lint → 렌더(예시 값) → CRD 스키마
 #   4. 사이트 스택 값(infra/k8s/values/*.tftpl): 예시 값으로 채워 고정 버전 차트(kube-prometheus-stack·fluent-bit)를
 #      렌더하고 단언한다(네트워크로 차트를 받는다). Alertmanager 설정은 amtool로 검사한다.
+#   5. 집 사이트(plan 0017): 앱 차트 + values-home.yaml(Roles Anywhere 사이드카), infra/home-k8s의 site-home·gitops 값·
+#      kube-prometheus-stack 값. AWS 렌더가 기준 브랜치(CHART_BASE_REF, 기본 main)와 같은지도 본다 — 기준이 없으면(CI의 얕은 체크아웃) 건너뛴다.
 #
 # 단언은 "되돌리면 장애가 나는 설정"만 고정한다(ADR 0007): HPA면 replicas 없음, preStop sleep,
 # readiness=/healthz, 롤링 surge 1·unavailable 0, 연결 예산, Image Updater 값의 이미지 참조.
@@ -30,6 +32,9 @@ K8S_VERSION="1.37.0" # infra/prod variables.tf eks_version과 맞춘다
 APP=deploy/helm/linkpulse
 LOCAL_SCHEMAS='scripts/schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 CRD_SCHEMAS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 
 fail=0
 check() {
@@ -59,6 +64,15 @@ check "종료 유예 45초" 'printf "%s" "$DEP" | grep -q "terminationGracePerio
 check "DB_MAX_OPEN_CONNS=11" 'printf "%s" "$DEP" | grep -A1 "name: DB_MAX_OPEN_CONNS" | grep -q "\"11\""'
 check "기본 이미지 ghcr.io/naerrow/linkpulse:main" 'printf "%s" "$DEP" | grep -q "image: \"ghcr.io/naerrow/linkpulse:main\""'
 check "aws 사이트는 비밀번호 파일 마운트 없음" '! printf "%s" "$DEP" | grep -q "db-password"'
+# plan 0017: Roles Anywhere 사이드카는 집 전용이다. AWS는 Pod Identity를 그대로 쓴다.
+check "aws 사이트는 서명 도우미 사이드카·IMDS 엔드포인트 env 없음" '! printf "%s" "$DEP" | grep -qE "initContainers:|rolesanywhere|AWS_EC2_METADATA_SERVICE_ENDPOINT"'
+BASE_REF="${CHART_BASE_REF:-main}"
+if git rev-parse -q --verify "$BASE_REF^{commit}" >/dev/null; then
+  mkdir -p "$TMP/base" && git archive "$BASE_REF" "$APP" | tar -x -C "$TMP/base"
+  check "AWS 렌더가 기준 브랜치(${BASE_REF})와 같다(집 사이트 변경이 AWS를 바꾸지 않는다)" 'diff <(helm template linkpulse "$TMP/base/$APP" -f "$TMP/base/$APP/values-aws.yaml" -n linkpulse) <(helm template linkpulse "$APP" -f "$APP/values-aws.yaml" -n linkpulse) >/dev/null'
+else
+  echo "⏭ AWS 렌더 기준 비교 건너뜀($BASE_REF 없음 — 얕은 체크아웃)"
+fi
 R2=$(helm template linkpulse "$APP" --set autoscaling.enabled=false -n linkpulse)
 check "HPA 끔 → replicas 렌더·HPA 없음" 'printf "%s" "$R2" | grep -q "^  replicas: 2" && ! printf "%s" "$R2" | grep -q "HorizontalPodAutoscaler"'
 R3=$(helm template linkpulse "$APP" --set image.tag=main@sha256:0123abcd -n linkpulse)
@@ -93,8 +107,6 @@ check "파드 템플릿 checksum/defaults가 기본값을 따라 바뀐다(바�
 echo "== 알림 규칙·대시보드 =="
 RULES="$APP/files/rules.yaml"
 DASH="$APP/files/dashboard.json"
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
 check "promtool check rules" 'promtool check rules "$RULES" >/dev/null'
 check "promtool test rules(빠른·느린 소진, 저트래픽, 클릭 유실, 발행 실패, 401, ArgoCD·Progressing 제외)" 'promtool test rules scripts/rules-test/linkpulse.test.yaml >/dev/null'
 check "대시보드 JSON 유효·uid 고정" '[ "$(jq -r .uid "$DASH")" = "linkpulse-overview" ]'
@@ -148,7 +160,7 @@ check "kubelet /metrics/resource 수집(E1 세 번째 출처)" 'grep -q "path: /
 check "기본 규칙 KubeDeploymentReplicasMismatch·KubeDeploymentRolloutStuck·KubePodNotReady(멈춘 확장·롤링)" 'grep -q "alert: KubeDeploymentReplicasMismatch$" "$K" && grep -q "alert: KubeDeploymentRolloutStuck$" "$K" && grep -q "alert: KubePodNotReady$" "$K"'
 check "Alertmanager 서비스 어카운트 = infra/prod Pod Identity 키" 'grep -q "serviceAccountName: alertmanager" "$K" && grep -A3 "alertmanager = {" infra/prod/iam.tf | grep -q "service_account = \"alertmanager\""'
 # Alertmanager 설정 Secret을 풀어 amtool로 본다. 템플릿 경로는 임시 디렉터리로 바꾼다.
-am_secret() { awk '/^kind: Secret/{f=1} f&&/^---/{f=0} f' "$K" | sed -n "s/^  $1: \"\(.*\)\"$/\1/p" | head -1 | base64 -d; }
+am_secret() { awk '/^kind: Secret/{f=1} f&&/^---/{f=0} f' "${2:-$K}" | sed -n "s/^  $1: \"\(.*\)\"$/\1/p" | head -1 | base64 -d; }
 am_secret alertmanager.yaml | sed "s|/etc/alertmanager/config/\*.tmpl|$TMP/*.tmpl|" >"$TMP/alertmanager.yaml"
 am_secret linkpulse.tmpl >"$TMP/linkpulse.tmpl"
 check "Alertmanager 설정 amtool check-config" 'amtool check-config "$TMP/alertmanager.yaml" >/dev/null'
@@ -167,5 +179,49 @@ check "fluent-bit $FB_VER 렌더" '[ -s "$F" ]'
 check "Fluent Bit tail: storage.type filesystem·DB·Rotate_Wait 30, Mem_Buf_Limit 없음(G-15)" 'grep -qE "storage.type +filesystem" "$F" && grep -qE "DB +/var/log/flb_kube.db" "$F" && grep -qE "Rotate_Wait +30" "$F" && ! grep -q Mem_Buf_Limit "$F"'
 check "Fluent Bit 서비스 storage.path·출력 total_limit_size" 'grep -q "storage.path /var/log/flb-storage/" "$F" && grep -qE "storage.total_limit_size +1G" "$F"'
 check "Fluent Bit /var/log 마운트가 쓰기 가능(readOnly 아님)" 'grep -q "mountPath: /var/log$" "$F" && ! grep -A2 "mountPath: /var/log$" "$F" | grep -q "readOnly: true"'
+
+echo "== 집 사이트(plan 0017) =="
+HV="$APP/values-home.yaml"
+check "집 helm lint" 'helm lint "$APP" -f "$HV" >/dev/null'
+H=$(helm template linkpulse "$APP" -f "$HV" -n linkpulse)
+check "집 kubeconform" 'printf "%s\n" "$H" | conform'
+HDEP=$(printf '%s\n' "$H" | awk '/^kind: Deployment/{f=1} f&&/^---/{f=0} f')
+# 사이드카 블록(initContainers부터 containers 전까지)만 떼어 본다.
+INIT=$(printf '%s\n' "$HDEP" | awk '/^      initContainers:/{f=1} /^      containers:/{f=0} f')
+check "서명 도우미가 네이티브 사이드카(initContainers + restartPolicy: Always)" 'printf "%s" "$INIT" | grep -q "name: rolesanywhere" && printf "%s" "$INIT" | grep -q "restartPolicy: Always"'
+check "사이드카에 probe 없음(127.0.0.1 바인드라 kubelet probe가 닿지 않는다)" '[ -n "$INIT" ] && ! printf "%s" "$INIT" | grep -qE "Probe:|tcpSocket:|httpGet:"'
+check "사이드카 이미지가 다이제스트 고정" 'printf "%s" "$INIT" | grep -qE "image: \"public.ecr.aws/rolesanywhere/credential-helper:[^\"]*@sha256:[0-9a-f]{64}\""'
+check "사이드카 인자: Secret 키 cert.pem·key.pem, ARN은 \$(RA_*) 참조, 포트 9911" '(for a in /var/run/secrets/rolesanywhere/cert.pem /var/run/secrets/rolesanywhere/key.pem "\$(RA_TRUST_ANCHOR_ARN)" "\$(RA_PROFILE_ARN)" "\$(RA_ROLE_ARN)" "\"9911\""; do printf "%s" "$INIT" | grep -qF -- "- $a" || exit 1; done)'
+check "사이드카 env = 사이트 ConfigMap configMapKeyRef 세 개뿐, envFrom 없음" '[ "$(printf "%s" "$INIT" | grep -c "configMapKeyRef:")" -eq 3 ] && [ "$(printf "%s" "$INIT" | grep -cE "^ +- name: RA_(TRUST_ANCHOR|PROFILE|ROLE)_ARN$")" -eq 3 ] && [ "$(printf "%s" "$INIT" | grep -c "name: linkpulse-site$")" -eq 3 ] && ! printf "%s" "$INIT" | grep -q "envFrom:"'
+check "사이드카 보안: 읽기 전용 루트·권한 상승 없음·capability 제거" 'printf "%s" "$INIT" | grep -q "readOnlyRootFilesystem: true" && printf "%s" "$INIT" | grep -q "allowPrivilegeEscalation: false" && printf "%s" "$INIT" | grep -q "drop: \[\"ALL\"\]"'
+check "인증서 Secret linkpulse-ra-cert를 읽기 전용 마운트" 'printf "%s" "$INIT" | grep -A2 "name: rolesanywhere-cert" | grep -q "readOnly: true" && printf "%s" "$HDEP" | grep -A2 "^        - name: rolesanywhere-cert$" | grep -q "secretName: linkpulse-ra-cert"'
+check "앱 env AWS_EC2_METADATA_SERVICE_ENDPOINT=http://127.0.0.1:9911" 'printf "%s" "$HDEP" | grep -A1 "name: AWS_EC2_METADATA_SERVICE_ENDPOINT" | grep -q "\"http://127.0.0.1:9911\""'
+check "DB 비밀번호 Secret linkpulse-db-password를 디렉터리로 마운트(subPath 없음)" 'printf "%s" "$HDEP" | grep -q "secretName: linkpulse-db-password" && printf "%s" "$HDEP" | grep -q "mountPath: /var/run/secrets/linkpulse$" && ! printf "%s" "$HDEP" | grep -q subPath'
+check "집 → ServiceMonitor·linkpulse 규칙 그룹 4개" 'printf "%s\n" "$H" | grep -q "^kind: ServiceMonitor" && [ "$(printf "%s\n" "$H" | grep -cE "^    - name: linkpulse-(slo|clicks|admin|argocd)$")" -eq 4 ]'
+check "values-home.yaml·site-home 차트에 ARN(계정 ID) 없음" '! grep -rq "arn:aws" "$HV" infra/home-k8s/charts/site-home'
+
+SITEH=infra/home-k8s/charts/site-home
+check "site-home helm lint" 'helm lint "$SITEH" >/dev/null'
+SH=$(helm template linkpulse-site "$SITEH" --set config.DB_HOST=192.168.0.51 --set config.RA_ROLE_ARN=arn:aws:iam::000000000000:role/linkpulse-home-app -n linkpulse)
+check "site-home kubeconform" 'printf "%s\n" "$SH" | conform'
+check "site-home: ConfigMap·Secret 이름이 앱 차트 site 값과 같고 TargetGroupBinding 없음" 'printf "%s" "$SH" | grep -q "name: linkpulse-site$" && printf "%s" "$SH" | grep -q "name: linkpulse-site-secret$" && ! printf "%s" "$SH" | grep -q TargetGroupBinding'
+check "site-home: 빈 비밀은 Secret에 넣지 않음" '! printf "%s" "$SH" | grep -q "ADMIN_TOKEN_SHA256"'
+GH=$(helm template linkpulse-gitops "$GITOPS" --set "valueFiles={values-home.yaml}" -n argocd)
+check "gitops 집 값 → 같은 차트 경로에 values-home.yaml 하나" 'printf "%s" "$GH" | grep -A1 "valueFiles:" | grep -q "^        - values-home.yaml$" && ! printf "%s" "$GH" | grep -q values-aws.yaml && printf "%s" "$GH" | grep -q "path: \"deploy/helm/linkpulse\""'
+check "infra/home-k8s가 gitops에 values-home.yaml을 준다" 'grep -qE "valueFiles += \[\"values-home.yaml\"\]" infra/home-k8s/main.tf'
+check "집·AWS 차트 버전이 같다(ArgoCD·Image Updater·kube-prometheus-stack)" '(for c in argo_cd argocd_image_updater kube_prometheus_stack; do a=$(chart_version "$c"); h=$(sed -n "s/^ *$c *= *\"\([^\"]*\)\".*/\1/p" infra/home-k8s/main.tf); [ -n "$a" ] && [ "$a" = "$h" ] || exit 1; done)'
+
+KH="$TMP/kps-home-render.yaml"
+helm template kube-prometheus-stack kube-prometheus-stack --repo https://prometheus-community.github.io/helm-charts --version "$KPS_VER" \
+  -n monitoring -f infra/home-k8s/values/kube-prometheus-stack.yaml --kube-version "$K8S_VERSION" >"$KH"
+check "집 kube-prometheus-stack $KPS_VER 렌더" '[ -s "$KH" ]'
+PROMH=$(awk '/^kind: Prometheus$/{f=1} f&&/^---/{f=0} f' "$KH")
+check "집: 컨트롤 플레인·kube-proxy ServiceMonitor 없음" '! grep -A3 "^kind: ServiceMonitor" "$KH" | grep -qE "name: .*(etcd|controller-manager|scheduler|kube-proxy)"'
+check "집: 선택자 {}(모든 네임스페이스의 CR)" '(for k in serviceMonitorSelector podMonitorSelector ruleSelector serviceMonitorNamespaceSelector podMonitorNamespaceSelector ruleNamespaceSelector; do printf "%s" "$PROMH" | grep -q "^  $k: {}$" || exit 1; done)'
+check "집: 보관 2일·emptyDir·kubelet /metrics/resource" 'printf "%s" "$PROMH" | grep -q "retention: \"2d\"" && ! printf "%s" "$PROMH" | grep -q volumeClaimTemplate && grep -q "path: /metrics/resource$" "$KH"'
+am_secret alertmanager.yaml "$KH" >"$TMP/am-home.yaml"
+check "집: Alertmanager 설정 amtool check-config" 'amtool check-config "$TMP/am-home.yaml" >/dev/null'
+check "집: 모든 알림 → null(외부 전달 없음), SNS 수신기 없음" '[ "$(amtool config routes test --config.file="$TMP/am-home.yaml" alertname=LinkpulseClicksDropped severity=critical)" = null ] && [ "$(amtool config routes test --config.file="$TMP/am-home.yaml" alertname=Watchdog)" = null ] && ! grep -q sns_configs "$TMP/am-home.yaml"'
+check "집: Alertmanager 서비스 어카운트 Pod Identity 이름을 쓰지 않음" '! grep -q "serviceAccountName: alertmanager$" "$KH"'
 
 exit $fail

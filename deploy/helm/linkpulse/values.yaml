@@ -22,6 +22,26 @@ dbPasswordSecret:
   name: ""
   mountPath: /var/run/secrets/linkpulse
 
+# AWS 밖 사이트(P6 집 k3s)의 AWS 인증: IAM Roles Anywhere 서명 도우미를 네이티브 사이드카로 둔다(plan 0017, ADR 0010).
+# 도우미는 X.509 인증서로 임시 자격증명을 받아 127.0.0.1:<port>에 IMDSv2 호환 엔드포인트를 연다. 앱 SDK는
+# AWS_EC2_METADATA_SERVICE_ENDPOINT로 그곳을 본다 — 앱 이미지·코드는 그대로다. AWS(EKS)는 Pod Identity라 끈다.
+# ARN 세 개(트러스트 앵커·프로필·역할)는 사이트 ConfigMap(site.configMapName)의 RA_TRUST_ANCHOR_ARN·RA_PROFILE_ARN·RA_ROLE_ARN이다
+# (계정 ID가 들어 있어 공개 저장소의 values 파일에 두지 않는다). 인증서 Secret의 키는 cert.pem·key.pem이다.
+awsRolesAnywhere:
+  enabled: false
+  # 공식 이미지(aws/rolesanywhere-credential-helper v1.8.5, 2026-08-24). 멀티아치 목록의 다이제스트로 고정한다.
+  # 실행 사용자 65532:65532, 셸·HTTP 도구 없음(그래서 exec probe도 쓸 수 없다 — deployment.yaml).
+  image: public.ecr.aws/rolesanywhere/credential-helper:1.8.5-2026.08.24.20.52@sha256:d06f1c35dd683d6f67c950fec3e39b3599bca5471acf05d8554650299d1029d7
+  certSecretName: linkpulse-ra-cert
+  # 도우미 기본 포트. 도우미는 127.0.0.1에만 바인드한다(aws_signing_helper/serve.go LocalHostAddress) — 파드 밖에서 닿지 않는다.
+  port: 9911
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
 # 런타임 기본값(plan 0016). 차트 ConfigMap <fullname>-defaults로 들어가고, 사이트 ConfigMap이 같은 키를 덮어쓴다.
 # env가 아니라 ConfigMap인 이유: env는 envFrom을 늘 이겨서 사이트가 바꿀 수 없다(장애 때 로그 전부 남기기, 측정 비교 실행).
 runtimeDefaults:

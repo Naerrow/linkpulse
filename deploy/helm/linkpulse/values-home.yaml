@@ -1,0 +1,21 @@
+# 집(P6 k3s) 사이트에서 기본값과 다른 값만 둔다(plan 0017, ADR 0010).
+#
+# DB 주소·큐 URL·Roles Anywhere ARN은 infra/home-k8s가 넣는 사이트 ConfigMap(linkpulse-site)에 있다.
+# 이 파일은 공개 저장소에 있으므로 ARN(계정 ID)·집 IP·비밀을 넣지 않는다.
+# ArgoCD Application(infra/home-k8s의 gitops)이 이 파일을 values.yaml 위에 겹쳐 쓴다.
+#
+# 파드 크기·HPA·런타임 기본값은 차트 기본값 그대로다. 연결 예산(파드 최대 7 × 풀 11 = 77)은 RDS 기준으로 잡은 값이지만
+# 집 PostgreSQL 16 기본 max_connections 100 안에 들어간다 — maxReplicas나 dbMaxOpenConns를 바꾸면 이 근거를 다시 본다.
+
+# infra/home-k8s가 kube-prometheus-stack을 Application보다 먼저 넣는다(CRD가 먼저 있다). AWS와 같다.
+monitoring:
+  enabled: true
+
+# DB 비밀번호 출처 file(plan 0014가 P6용으로 만든 경로). Secret은 사람이 kubectl로 넣는다(키 password,
+# Terraform state에 평문을 남기지 않으려고 — 런북 home-site.md). 앱은 DB_PASSWORD_FILE=<mountPath>/password를 읽는다.
+dbPasswordSecret:
+  name: linkpulse-db-password
+
+# Roles Anywhere 사이드카(이미지·포트·Secret 이름은 차트 기본값). Secret linkpulse-ra-cert도 사람이 kubectl로 넣는다(키 cert.pem·key.pem).
+awsRolesAnywhere:
+  enabled: true
