@@ -1,0 +1,68 @@
+# kube-prometheus-stack 집 사이트 값(plan 0017 설계 7). infra/home-k8s/main.tf가 그대로 넣는다(채울 자리가 없다).
+# AWS 값(infra/k8s/values/kube-prometheus-stack.yaml.tftpl)과 같은 원칙이다 — 한쪽을 바꾸면 다른 쪽도 본다.
+# 다른 점: 알림 수신처가 null이다(외부 전달은 "감시는 집 밖에서"와 함께 P7), SNS·Pod Identity가 없다.
+# scripts/check-charts.sh가 이 파일로 같은 버전 차트를 렌더하고 단언한다.
+
+# ---- 긁지 않는 것 ----
+# k3s는 컨트롤 플레인(apiserver·controller-manager·scheduler)과 kube-proxy를 한 프로세스에 넣고, etcd 대신 SQLite(kine)를 쓴다.
+# 차트가 기대하는 따로 뜬 대상이 없어 켜 두면 TargetDown·KubeSchedulerDown 같은 알림이 늘 울린다. AWS와 같이 수집·규칙을 함께 끈다.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeProxy: false
+
+# metrics-server와 같은 출처(kubelet /metrics/resource)도 긁는다(AWS와 같다).
+kubelet:
+  serviceMonitor:
+    resource: true
+    resourcePath: /metrics/resource
+
+prometheus:
+  prometheusSpec:
+    # 선택자 계약(차트 ↔ 사이트): 앱 차트·ArgoCD 차트는 release 라벨을 넣지 않는다. false면 모든 네임스페이스의 CR을 고른다.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    # emptyDir(PVC 없음). 집 데이터의 장기 보관은 범위 밖이다. 단일 노드 8GiB에 앱 최대 7개와 함께 들어가는 크기는 AWS와 같다.
+    retention: 2d
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+
+grafana:
+  # adminPassword를 두지 않는다 — 고정한 차트(91.8.2)는 Grafana가 난수 Secret을 만든다(AWS 값 파일의 확인 기록). 화면에 찍지 않는다.
+  grafana.ini:
+    auth.anonymous:
+      enabled: true
+      org_role: Viewer
+  # 대시보드 사이드카 계약: 앱 차트의 ConfigMap 라벨(grafana_dashboard: "1")과 같아야 한다.
+  sidecar:
+    dashboards:
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+
+# ---- 알림: Alertmanager 화면까지만 ----
+# 규칙은 AWS와 같이 평가되고 Alertmanager에 모인다(kubectl port-forward로 본다). 밖으로 보내지 않는다.
+alertmanager:
+  config:
+    route:
+      receiver: "null"
+      group_by: [alertname]
+      repeat_interval: 4h
+    receivers:
+      - name: "null"

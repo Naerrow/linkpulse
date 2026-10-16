@@ -1,0 +1,5 @@
+apiVersion: v2
+name: site-home
+description: linkpulse 집 사이트 값(ConfigMap·Secret). site-aws에서 TargetGroupBinding을 뺀 모양이다. infra/home-k8s가 helm_release로 넣는다(plan 0017).
+type: application
+version: 0.1.0
