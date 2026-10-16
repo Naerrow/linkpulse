@@ -67,6 +67,7 @@ pveum user token add terraform@pve linkpulse --privsep 0
 
 ```bash
 brew install ansible            # community.general(ufw)·community.postgresql이 들어 있다
+openssl version                 # OpenSSL 3 이상이어야 한다(home-pki.sh). LibreSSL이면 brew install openssl@3 후 그 bin을 PATH 앞에 둔다
 ls ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519
 mkdir -p ~/.linkpulse-home/bin && chmod 700 ~/.linkpulse-home
 U=https://rolesanywhere.amazonaws.com/releases/1.8.5/Aarch64/MacOS/Sonoma/aws_signing_helper
@@ -157,7 +158,7 @@ hk() { kubectl --kubeconfig "$HOME/.kube/linkpulse-home.yaml" --context linkpuls
 hk get nodes -o wide
 hk -n kube-system get deploy,ds | grep -iE 'traefik|svclb' || echo "Traefik·ServiceLB 없음"
 hk -n kube-system rollout status deploy/coredns --timeout=60s
-hk run apitest --rm -i --restart=Never --image=curlimages/curl:8.16.0 -- curl -sk https://kubernetes.default.svc/version | grep gitVersion
+hk run apitest --rm -i --restart=Never --image=curlimages/curl:8.16.0 -- sh -c 'curl -sk -H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" https://kubernetes.default.svc/version' | grep gitVersion
 G=$(terraform -chdir=.. output -raw pg_ip)
 hk run pgtest --rm -i --restart=Never --image=postgres:16.10 --env=PGHOST=$G -- sh -c 'read -r PGPASSWORD || true; export PGPASSWORD; psql "dbname=linkpulse user=linkpulse sslmode=require" -Atc "select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()"' < ~/.linkpulse-home/db-password
 ssh ubuntu@$G "sudo -u postgres psql -Atc 'show wal_level' -c \"select datname, pg_get_userbyid(datdba) from pg_database where datname = 'linkpulse'\""
@@ -165,7 +166,7 @@ nc -vz -G 3 $G 5432
 ```
 통과:
 - 노드 `Ready`, `VERSION v1.37.1+k3s1`. Traefik·ServiceLB 없음. CoreDNS `successfully rolled out`.
-- `apitest`: `"gitVersion": "v1.37.1+k3s1"` — 파드 → apiserver 경로(ufw를 끈 이유)가 열려 있다.
+- `apitest`: `"gitVersion": "v1.37.1+k3s1"` — 파드 → apiserver 경로(ufw를 끈 이유)가 열려 있다. 파드의 서비스 어카운트 토큰을 싣는 이유: k3s는 apiserver 익명 인증을 끈다(토큰 없이는 401이라 경로가 열려 있어도 실패로 보인다).
 - `pgtest`: `linkpulse|t` — k3s 노드(파드는 노드 IP로 나간다)에서 TLS로 붙었다. 비밀번호는 표준 입력으로만 들어가 명령줄·파드 정의에 남지 않는다.
 - `ssh` 줄: `logical`과 `linkpulse|linkpulse`(DB 소유자 = linkpulse).
 - `nc`: 맥(다른 LAN 기기)에서 5432는 **실패**(`Operation timed out` 또는 `refused`). ufw가 k3s 노드만 받는다.
@@ -288,8 +289,12 @@ ssh-keygen -R "$K"; ssh-keygen -R "$G"
 
 ```bash
 scripts/home-pki.sh --renew-leaf
+# Secret을 바꾸기 전에: 새 말단으로 역할을 맡는지(1-검증의 aws-config가 app.crt를 가리킨다). assumed-role/linkpulse-home-app이 아니면 멈춘다.
+AWS_CONFIG_FILE=$HOME/.linkpulse-home/aws-config aws sts get-caller-identity --profile home-app --query Arn --output text | sed -E 's/[0-9]{12}/<계정>/'
 hk -n linkpulse create secret generic linkpulse-ra-cert --from-file=cert.pem=$HOME/.linkpulse-home/pki/app.crt --from-file=key.pem=$HOME/.linkpulse-home/pki/app.key --dry-run=client -o yaml | hk apply -f -
 hk -n linkpulse rollout restart deploy/linkpulse && hk -n linkpulse rollout status deploy/linkpulse
+# 재시작 뒤: 발행 실패가 1분 동안 늘지 않는지(두 값이 같아야 한다).
+hk -n linkpulse port-forward deploy/linkpulse 9090:9090 >/dev/null & sleep 32; curl -s localhost:9090/metrics | grep '^linkpulse_clicks_publish_errors_total'; sleep 60; curl -s localhost:9090/metrics | grep '^linkpulse_clicks_publish_errors_total'; kill %1
 ```
 
 **DB 비밀번호 회전** — 판정 (d)와 같은 순서(파일 → `ansible-playbook site.yml --limit postgres` → Secret `apply`). 비밀번호의 원본은 `~/.linkpulse-home/db-password` 하나다.

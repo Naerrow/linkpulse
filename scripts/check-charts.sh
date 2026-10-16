@@ -209,6 +209,8 @@ check "site-home: 빈 비밀은 Secret에 넣지 않음" '! printf "%s" "$SH" | 
 GH=$(helm template linkpulse-gitops "$GITOPS" --set "valueFiles={values-home.yaml}" -n argocd)
 check "gitops 집 값 → 같은 차트 경로에 values-home.yaml 하나" 'printf "%s" "$GH" | grep -A1 "valueFiles:" | grep -q "^        - values-home.yaml$" && ! printf "%s" "$GH" | grep -q values-aws.yaml && printf "%s" "$GH" | grep -q "path: \"deploy/helm/linkpulse\""'
 check "infra/home-k8s가 gitops에 values-home.yaml을 준다" 'grep -qE "valueFiles += \[\"values-home.yaml\"\]" infra/home-k8s/main.tf'
+# 사이트 ↔ 차트 계약: 비밀번호 파일 경로 = 차트 dbPasswordSecret.mountPath + Secret 키 password(런북 4단계의 --from-file=password=).
+check "infra/home-k8s DB_PASSWORD_FILE = 차트 mountPath/password" 'grep -qE "DB_PASSWORD_FILE += \"$(sed -n "/^dbPasswordSecret:/,/^[a-z]/s/^  mountPath: //p" "$APP/values.yaml")/password\"" infra/home-k8s/main.tf'
 check "집·AWS 차트 버전이 같다(ArgoCD·Image Updater·kube-prometheus-stack)" '(for c in argo_cd argocd_image_updater kube_prometheus_stack; do a=$(chart_version "$c"); h=$(sed -n "s/^ *$c *= *\"\([^\"]*\)\".*/\1/p" infra/home-k8s/main.tf); [ -n "$a" ] && [ "$a" = "$h" ] || exit 1; done)'
 
 KH="$TMP/kps-home-render.yaml"
