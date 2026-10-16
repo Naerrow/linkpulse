@@ -1,0 +1,28 @@
+# 두 VM 공통. 방화벽(ufw)은 여기서 다루지 않는다 — Postgres VM만 켜고 k3s VM은 끈다(각 역할, plan 0017 설계 2·3).
+- name: 패키지 목록 갱신
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+# acl: postgres 같은 비root 사용자로 become할 때 임시 파일 권한을 맞춘다.
+- name: 게스트 에이전트·시간 동기·acl 설치
+  ansible.builtin.apt:
+    name:
+      - qemu-guest-agent
+      - systemd-timesyncd
+      - acl
+    state: present
+
+# Proxmox VM 설정(infra/home agent.enabled)이 이 에이전트를 기대한다. 없으면 Proxmox의 Shutdown이 시간 초과로 실패한다.
+# 유닛은 virtio 포트가 생기면 udev가 띄우는 정적 유닛이라 enable하지 않고 시작만 한다.
+- name: 게스트 에이전트 시작
+  ansible.builtin.systemd_service:
+    name: qemu-guest-agent
+    state: started
+
+# 인증서 유효 기간·SigV4 서명(Roles Anywhere·SQS)·로그 시각이 시계에 달려 있다.
+- name: 시간 동기 켜기
+  ansible.builtin.systemd_service:
+    name: systemd-timesyncd
+    state: started
+    enabled: true

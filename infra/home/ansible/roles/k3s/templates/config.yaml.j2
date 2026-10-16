@@ -1,0 +1,10 @@
+# Ansible이 관리한다(infra/home/ansible roles/k3s, plan 0017 설계 2). 바뀌면 k3s를 다시 시작한다.
+# 키는 k3s server 플래그와 같다(--disable=traefik,servicelb 등).
+node-ip: {{ ansible_host }}
+# 맥의 kubeconfig가 이 주소로 붙는다(서버 인증서에 넣는다).
+tls-san:
+  - {{ ansible_host }}
+write-kubeconfig-mode: "0600"
+disable:
+  - traefik
+  - servicelb

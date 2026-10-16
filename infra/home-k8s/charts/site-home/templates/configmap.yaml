@@ -1,0 +1,10 @@
+# 이름은 앱 차트(deploy/helm/linkpulse values.yaml site.configMapName)와 맞아야 한다.
+# 바꾼 뒤에는 kubectl rollout restart deploy/linkpulse -n linkpulse가 필요하다(envFrom·configMapKeyRef는 변경을 다시 읽지 않는다).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: linkpulse-site
+data:
+  {{- range $k, $v := .Values.config }}
+  {{ $k }}: {{ $v | toString | quote }}
+  {{- end }}

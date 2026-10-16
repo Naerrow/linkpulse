@@ -508,3 +508,35 @@ level=error msg="Error: 링크 생성 실패: 0 null …" (05:37:46)
 **해결** — `chmod +x load/k6/goroutine-snap.sh`(git이 `mode change 100644 => 100755`로 본다). 같은 창에서 실제 클러스터에 대고 한 번 돌려 스냅숏 5개가 남는 것을 확인했다.
 
 **재발 방지** — 새 실행 스크립트는 **실제로 한 번 실행해 본다**(문법 검사만으로 끝내지 않는다). 커밋 전에 `git ls-files -s load/k6/*.sh scripts/*.sh`로 모드가 `100755`인지 본다.
+
+## G-23. 변이 시험이 전부 "실패 ✅"였는데, 단언이 아니라 도구가 죽은 것이었다
+
+**증상** — plan 0017 A3 변이 시험(2026-10-16). 집 Ansible 렌더 단언(`infra/home/ansible/tests/render.yml`) 변이 10종과 `infra/home` `terraform test` 변이 3종이 모두 "실패 ✅"로 나왔다. 실패한 단언 이름을 찍으려 하자 빈칸이었다. 출력 원문은 이랬다.
+```
+TimeoutError: Local RPC server did not start.            ← ansible-playbook
+panic: unexpected error marshalling value: value has marks, so it cannot be serialized as JSON   ← terraform test
+```
+
+**원인**
+1. Ansible: 변이 하네스가 출력 경로를 바꾸려고 `TMPDIR`을 scratchpad의 긴 경로로 덮어썼다. ansible-core 2.21은 시작할 때 `TMPDIR` 아래에 로컬 RPC 소켓을 만드는데, 경로가 길어 소켓을 못 열고 플레이북이 시작도 못 했다. 원본으로 돌렸어도 같은 오류였다.
+2. Terraform: 단언이 `for v in proxmox_virtual_environment_vm.vm : v.cpu[0].type == ...`처럼 **VM 객체 전체**를 반복했다. 그 객체에는 민감 속성(`user_account.password`)이 있어 값에 "mark"가 붙는다. 단언이 **실패할 때만** Terraform이 값을 출력하려다 패닉한다(통과할 때는 멀쩡하다).
+
+두 경우 모두 종료 코드가 0이 아니라서 "변이를 잡았다"로 읽혔다.
+
+**해결** — Ansible은 `TMPDIR` 대신 `-e out=<경로>`로 출력 경로만 바꾼다. 단언은 VM을 키로 하나씩 가리킨다(`vm["lp-k3s-1"].cpu[0].type`) — 민감 속성이 든 객체 전체를 단언에서 반복하지 않는다. 고친 뒤 13종이 각각 **그 단언 이름으로** 실패하고, 원본은 통과하는 것을 확인했다.
+
+**재발 방지** — 변이 시험은 "실패했다"로 끝내지 않고 **어느 단언에서 실패했는지**를 본다. 도구 오류(Traceback·panic)는 실패가 아니라 무효로 센다. G-14·G-16과 같은 원칙(틀린 값으로 ❌, 맞는 값으로 ✅)의 세 번째 사례다.
+
+## G-24. `set -u` 스크립트가 한국어 메시지에서 `unbound variable`로 죽었다
+
+**증상** — `scripts/home-pki.sh --test-leaf linkpulse-home-app`(일부러 거부되는 입력)이 거부 메시지 대신 이렇게 끝났다.
+```
+scripts/home-pki.sh: line 129: APP_CN�: unbound variable
+```
+
+**원인** — 메시지가 `"... $APP_CN과 달라야 한다"`였다. UTF-8 환경의 bash는 변수 이름 바로 뒤의 한글 바이트를 이름의 일부로 읽어 `APP_CN과`라는 없는 변수를 찾았고, `set -u`라 그 자리에서 끝났다. `shellcheck`는 잡지 못했다.
+
+**해결** — 한글이 바로 붙는 변수는 중괄호로 감싼다(`${APP_CN}과`). `grep -nP '\$[A-Za-z_]+[\x{AC00}-\x{D7A3}]' <파일>`로 남은 곳이 없는지 본다.
+같은 날 `scripts/check-charts.sh`에 새 단언을 넣다가 `"... $BASE_REF와 같다"`로 **한 번 더** 걸렸다(`line 72: BASE_REF�: unbound variable`, 그 뒤 단언이 모두 빠졌다). 같은 grep으로 `scripts/*.sh`를 다시 훑어 남은 곳이 없음을 확인했다.
+
+**재발 방지** — 새 셸 스크립트의 **거부 경로도 한 번 실행한다**(G-22와 같은 원칙 — 정상 경로만 돌리면 메시지 줄은 실행되지 않는다).

@@ -1,0 +1,6 @@
+# brew install ansible에 들어 있다. ansible-core만 있으면: ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: community.general # ufw
+    version: ">=10.0.0"
+  - name: community.postgresql # postgresql_user·postgresql_db
+    version: ">=3.0.0"

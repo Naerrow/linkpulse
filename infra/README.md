@@ -5,6 +5,7 @@ AWS(ap-northeast-2)에 **EKS**로 배포한다(plan 0014 — P1~P4는 ECS Fargat
 - `bootstrap/` — Terraform state용 S3 버킷 1개만 생성(state는 로컬).
 - `prod/` — VPC·ALB·RDS·SQS·EKS(클러스터·노드·애드온)·IAM 등 AWS 리소스(S3 backend, 키 `prod/`).
 - `k8s/` — 클러스터 안의 것: kube-prometheus-stack(Prometheus·Alertmanager·Grafana, plan 0015)·LB 컨트롤러·ArgoCD·Image Updater·Fluent Bit·사이트 값(ConfigMap·Secret)·TargetGroupBinding·ArgoCD Application(S3 backend, 키 `k8s/`). 차트 값 중 긴 것은 `k8s/values/*.tftpl`에 있다. helm·kubernetes provider는 클러스터가 있어야 설정되므로 `prod/` 다음에 따로 apply한다.
+- `home/`·`home/ansible/`·`home-aws/`·`home-k8s/` — 집 사이트(P6, plan 0017): Proxmox VM 두 대·k3s·PostgreSQL 16, Roles Anywhere·집 클릭 큐(늘 켬), 클러스터 안 구성 요소. 절차는 [`docs/runbooks/home-site.md`](../docs/runbooks/home-site.md), 설계는 [ADR 0010](../docs/adr/0010-home-site.md). 로컬 단언: `home`·`home-aws`에서 `terraform test`, `home/ansible`에서 `ansible-playbook -i localhost, tests/render.yml`.
 - 앱 자체는 Terraform이 아니라 **ArgoCD가 git의 차트(`deploy/helm/linkpulse`)로** 배포한다. 이미지는 CI가 GHCR에 올리고, Image Updater가 `main` 다이제스트를 따라간다.
 
 ## 배포 순서

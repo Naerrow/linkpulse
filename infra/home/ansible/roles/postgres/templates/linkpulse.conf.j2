@@ -1,0 +1,13 @@
+# Ansible이 관리한다(infra/home/ansible roles/postgres, plan 0017 설계 3). 손으로 고치면 다음 실행이 되돌린다.
+# postgresql.conf 끝의 include_dir = 'conf.d'가 이 파일을 읽어 위의 값을 덮어쓴다.
+listen_addresses = 'localhost,{{ ansible_host }}'
+
+# 앱은 sslmode=require다(AWS와 같은 사이트 값). 인증서는 패키지가 만든 자체 서명(snakeoil)이다 — require는 서버 인증서를 검증하지 않는다.
+ssl = on
+ssl_cert_file = '/etc/ssl/certs/ssl-cert-snakeoil.pem'
+ssl_key_file = '/etc/ssl/private/ssl-cert-snakeoil.key'
+
+# 0019 논리 복제(RDS → 집) 준비. 바꾸려면 재시작이 필요해 지금 켠다.
+wal_level = logical
+
+password_encryption = scram-sha-256

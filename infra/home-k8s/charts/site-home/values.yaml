@@ -1,0 +1,11 @@
+# 모두 infra/home-k8s/main.tf가 채운다. 여기 기본값은 helm template 검사용 빈 값이다.
+# 공개 저장소다 — ARN(계정 ID)·집 IP·비밀의 실제 값을 여기에 쓰지 않는다.
+
+# 앱이 envFrom으로 읽는 설정(비밀 아님). 키가 곧 env 이름이다.
+# RA_TRUST_ANCHOR_ARN·RA_PROFILE_ARN·RA_ROLE_ARN은 앱이 아니라 서명 도우미 사이드카가 configMapKeyRef로 읽는다(앱 차트 deployment.yaml).
+config: {}
+
+# 앱이 envFrom으로 읽는 비밀. 빈 값인 키는 넣지 않는다(앱은 미설정과 빈 값을 같게 본다 — 관리자 기능 꺼짐).
+# DB 비밀번호·인증서 키는 여기가 아니다 — 사람이 kubectl로 따로 넣는다(state에 평문을 남기지 않으려고).
+secret:
+  ADMIN_TOKEN_SHA256: ""

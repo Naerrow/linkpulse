@@ -43,3 +43,6 @@ docs/plans/*/code*
 docs/plans/*/commands-explained.md
 CLAUDE.md
 AGENTS.md
+# 집 사이트(plan 0017): Terraform 출력으로 만든 Ansible 인벤토리(집 IP), 실수로 들어온 개인 키
+infra/home/ansible/inventory.yml
+infra/home*/**/*.key

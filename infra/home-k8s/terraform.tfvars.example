@@ -1,0 +1,10 @@
+# `terraform.tfvars`로 복사해 채운다(실제 tfvars는 .gitignore).
+
+# infra/prod/backend.hcl의 bucket과 같은 값(infra/home·infra/home-aws의 원격 state를 읽는다).
+tfstate_bucket = "lpulse-tfstate-<account-id>-apne2"
+
+# 관리자 토큰의 SHA-256 해시. AWS(infra/k8s/terraform.tfvars)와 같은 값을 쓴다. 원문은 여기에도 어디에도 두지 않는다.
+# admin_token_sha256 = "<64자>"
+
+# 기본값과 다를 때만 적는다.
+# kubeconfig_path = "~/.kube/linkpulse-home.yaml"

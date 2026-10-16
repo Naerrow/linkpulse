@@ -1,0 +1,6 @@
+# Ansible이 관리한다(infra/home/ansible roles/postgres, plan 0017 설계 3). 손으로 고치면 다음 실행이 되돌린다.
+# 네트워크로는 k3s 노드에서 오는 linkpulse 연결 하나만 받는다(TLS 필수). 파드 트래픽은 k3s(flannel)가 노드 IP로 바꿔 나간다.
+# TYPE  DATABASE  USER  ADDRESS  METHOD
+local   all       postgres       peer
+local   all       all            peer
+hostssl {{ pg_db }} {{ pg_user }} {{ k3s_node_ip }}/32 scram-sha-256

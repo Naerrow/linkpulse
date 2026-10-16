@@ -1,0 +1,17 @@
+# 버전 고정(2주 규칙). k3s는 EKS(1.37)와 같은 마이너다.
+k3s_version: v1.37.1+k3s1
+# 같은 태그의 설치 스크립트(raw.githubusercontent.com/k3s-io/k3s/<태그>/install.sh)의 SHA-256. 버전을 올리면 다시 잰다.
+# 스크립트는 받은 k3s 바이너리를 같은 릴리스의 sha256sum 파일과 대조한다.
+k3s_install_script_sha256: ed01f89fd977bf20ac1516bbebf8370bf3ddbaa55dac8aba610956a4c78cc00b
+
+# RDS 메이저와 같다. Ubuntu 24.04의 기본 PostgreSQL이 16이다.
+pg_version: 16
+pg_db: linkpulse
+pg_user: linkpulse
+
+# 맥(ansible을 돌리는 쪽)의 파일. 저장소 밖이다.
+pg_password_file: "{{ lookup('ansible.builtin.env', 'HOME') }}/.linkpulse-home/db-password"
+kubeconfig_dest: "{{ lookup('ansible.builtin.env', 'HOME') }}/.kube/linkpulse-home.yaml"
+
+# 인벤토리(Terraform 출력)에서 온다. 단일 노드라 그룹의 첫 호스트다.
+k3s_node_ip: "{{ hostvars[groups['k3s'][0]].ansible_host }}"

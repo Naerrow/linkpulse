@@ -1,0 +1,94 @@
+# 템플릿 렌더·역할 구조 단언(plan 0017 A3). VM에 닿지 않는다(localhost).
+#   cd infra/home/ansible && ansible-playbook -i localhost, tests/render.yml
+# 되돌리면 장애·노출이 나는 설정만 고정한다: ssl·wal_level·pg_hba 한 줄·DB 소유자·비밀번호 no_log·ufw 위치.
+# 태스크는 모듈 키("community.postgresql.postgresql_db" 등)로 고른다. selectattr는 점을 중첩 경로로 읽어 쓸 수 없다.
+- name: 집 Ansible 렌더 단언
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_host: 192.168.0.51
+    k3s_node_ip: 192.168.0.50
+    pg_db: linkpulse
+    pg_user: linkpulse
+    roles_dir: "{{ playbook_dir }}/../roles"
+    out: "{{ lookup('ansible.builtin.env', 'TMPDIR') | default('/tmp', true) }}/linkpulse-ansible-render"
+    pg_tasks: "{{ lookup('ansible.builtin.file', roles_dir ~ '/postgres/tasks/main.yml') | from_yaml }}"
+    k3s_tasks: "{{ lookup('ansible.builtin.file', roles_dir ~ '/k3s/tasks/main.yml') | from_yaml }}"
+    common_tasks: "{{ lookup('ansible.builtin.file', roles_dir ~ '/common/tasks/main.yml') | from_yaml }}"
+    group_vars: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../group_vars/all.yml') | from_yaml }}"
+  tasks:
+    - name: 출력 디렉터리
+      ansible.builtin.file:
+        path: "{{ out }}"
+        state: directory
+        mode: "0700"
+
+    - name: 템플릿 렌더
+      ansible.builtin.template:
+        src: "{{ roles_dir }}/{{ item.src }}"
+        dest: "{{ out }}/{{ item.dest }}"
+        mode: "0600"
+      loop:
+        - { src: postgres/templates/linkpulse.conf.j2, dest: linkpulse.conf }
+        - { src: postgres/templates/pg_hba.conf.j2, dest: pg_hba.conf }
+        - { src: k3s/templates/config.yaml.j2, dest: k3s-config.yaml }
+
+    - name: Postgres 설정 — ssl on·wal_level logical·LAN 주소에서 듣기
+      ansible.builtin.assert:
+        that:
+          - conf is search('(?m)^ssl = on$')
+          - conf is search('(?m)^wal_level = logical$')
+          - conf is search("(?m)^listen_addresses = 'localhost,192.168.0.51'$")
+      vars:
+        conf: "{{ lookup('ansible.builtin.file', out ~ '/linkpulse.conf') }}"
+
+    - name: pg_hba — 네트워크 줄은 k3s 노드의 linkpulse TLS 연결 하나뿐
+      ansible.builtin.assert:
+        that:
+          - net_lines | length == 1
+          - net_lines[0].split() == ['hostssl', 'linkpulse', 'linkpulse', '192.168.0.50/32', 'scram-sha-256']
+      vars:
+        net_lines: "{{ lookup('ansible.builtin.file', out ~ '/pg_hba.conf').splitlines() | reject('match', '^\\s*(#|$|local\\s)') | list }}"
+
+    - name: k3s 설정 — Traefik·ServiceLB 끔, 노드 IP 고정
+      ansible.builtin.assert:
+        that:
+          - k3s_conf.disable | sort == ['servicelb', 'traefik']
+          - k3s_conf['node-ip'] == '192.168.0.51'
+      vars:
+        k3s_conf: "{{ lookup('ansible.builtin.file', out ~ '/k3s-config.yaml') | from_yaml }}"
+
+    - name: DB 소유자 = linkpulse(PG15+ public 스키마 CREATE)
+      ansible.builtin.assert:
+        that:
+          - db_task | length == 1
+          - db_task[0]['community.postgresql.postgresql_db'].owner is search('pg_user')
+          - group_vars.pg_user == 'linkpulse' and group_vars.pg_db == 'linkpulse'
+      vars:
+        db_task: "{%- set r = [] -%}{%- for t in pg_tasks if 'community.postgresql.postgresql_db' in t -%}{%- set _ = r.append(t) -%}{%- endfor -%}{{ r }}"
+
+    - name: 비밀번호를 다루는 태스크는 no_log
+      ansible.builtin.assert:
+        that:
+          - pw_tasks | length >= 1
+          - pw_tasks | rejectattr('no_log', 'defined') | list | length == 0
+          - pw_tasks | selectattr('no_log', 'defined') | rejectattr('no_log') | list | length == 0
+      vars:
+        pw_user: "{%- set r = [] -%}{%- for t in pg_tasks if 'community.postgresql.postgresql_user' in t -%}{%- set _ = r.append(t) -%}{%- endfor -%}{{ r }}"
+        kc_slurp: "{%- set r = [] -%}{%- for t in k3s_tasks if 'ansible.builtin.slurp' in t -%}{%- set _ = r.append(t) -%}{%- endfor -%}{{ r }}"
+        kc_copy: "{%- set r = [] -%}{%- for t in k3s_tasks if 'ansible.builtin.copy' in t -%}{%- set _ = r.append(t) -%}{%- endfor -%}{{ r }}"
+        pw_tasks: "{{ pw_user + kc_slurp + kc_copy }}"
+
+    - name: ufw — Postgres만 켜고 k3s는 끄고 common은 건드리지 않음
+      ansible.builtin.assert:
+        that:
+          - common_ufw | length == 0
+          - k3s_ufw | length == 1 and k3s_ufw[0]['community.general.ufw'].state == 'disabled'
+          - pg_ufw_args | selectattr('state', 'defined') | map(attribute='state') | list == ['enabled']
+          - pg_ufw_args | selectattr('port', 'defined') | map(attribute='port') | sort == ['22', '5432']
+      vars:
+        common_ufw: "{%- set r = [] -%}{%- for t in common_tasks if 'community.general.ufw' in t -%}{%- set _ = r.append(t) -%}{%- endfor -%}{{ r }}"
+        k3s_ufw: "{%- set r = [] -%}{%- for t in k3s_tasks if 'community.general.ufw' in t -%}{%- set _ = r.append(t) -%}{%- endfor -%}{{ r }}"
+        pg_ufw: "{%- set r = [] -%}{%- for t in pg_tasks if 'community.general.ufw' in t -%}{%- set _ = r.append(t) -%}{%- endfor -%}{{ r }}"
+        pg_ufw_args: "{%- set r = [] -%}{%- for t in pg_ufw -%}{%- set _ = r.append(t['community.general.ufw']) -%}{%- endfor -%}{{ r }}"

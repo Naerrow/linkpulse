@@ -1,0 +1,86 @@
+# k3s 서버 하나(plan 0017 설계 2). 공개 노출이 없어 내장 Traefik·ServiceLB를 끈다. 내장 metrics-server는 HPA가 쓴다.
+
+# k3s 문서(installation/requirements) 권장: "It is recommended to turn off ufw". 켜 두면 파드 → apiserver(출발지 파드 IP),
+# 맥 → 6443, Prometheus → node-exporter 9100·kubelet 10250, metrics-server → kubelet이 막힌다.
+# 집 LAN 안·공유기 NAT 뒤라 밖에서 닿지 않는다. 서비스 서버 VLAN 분리는 P7이다.
+- name: ufw 끄기(k3s 문서 권장)
+  community.general.ufw:
+    state: disabled
+
+# 설치 스크립트가 서비스를 만들기 전에 둔다 — k3s는 기동 때 이 파일을 읽는다.
+- name: k3s 설정 디렉터리
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+
+- name: k3s 설정 파일
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0600"
+  notify: Restart k3s
+
+- name: 설치된 k3s 버전 확인
+  ansible.builtin.command: k3s --version
+  register: k3s_installed
+  changed_when: false
+  failed_when: false
+
+# get.k3s.io는 늘 최신 스크립트라 같은 태그의 스크립트를 체크섬과 함께 받는다(태그의 +는 URL에서 %2B).
+- name: 고정 버전 설치 스크립트 받기
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/k3s-io/k3s/{{ k3s_version | replace('+', '%2B') }}/install.sh"
+    dest: /usr/local/lib/k3s-install.sh
+    checksum: "sha256:{{ k3s_install_script_sha256 }}"
+    mode: "0700"
+
+- name: k3s 설치(없거나 버전이 다를 때만)
+  ansible.builtin.command: /usr/local/lib/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+  when: k3s_installed.rc != 0 or k3s_version not in k3s_installed.stdout
+  changed_when: true
+
+- name: 바뀐 설정을 지금 반영
+  ansible.builtin.meta: flush_handlers
+
+# k3s는 apiserver가 뜨면 systemd에 준비됨을 알린다(노드 등록 전). 그때 노드가 0개면 kubectl wait는 기다리지 않고
+# "no matching resources found"로 바로 실패하므로, 노드가 생길 때까지 다시 시도한다(최대 3분).
+- name: 노드 Ready 기다리기
+  ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+  register: k3s_node_ready
+  until: k3s_node_ready.rc == 0
+  retries: 36
+  delay: 5
+  changed_when: false
+
+# kubeconfig를 맥으로 가져온다. 서버 주소를 VM IP로, 이름(default)을 linkpulse-home으로 바꾼다 —
+# EKS 컨텍스트와 섞이지 않게 하고, infra/home-k8s 공급자가 이 컨텍스트 이름이 없으면 멈춘다(엉뚱한 파일 방지).
+# 관리자 인증서·키가 들어 있어 화면·로그에 찍지 않는다(no_log).
+- name: kubeconfig 읽기
+  ansible.builtin.slurp:
+    src: /etc/rancher/k3s/k3s.yaml
+  register: k3s_kubeconfig
+  no_log: true
+
+- name: 맥 ~/.kube 디렉터리
+  ansible.builtin.file:
+    path: "{{ kubeconfig_dest | dirname }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+- name: kubeconfig를 맥에 쓰기
+  ansible.builtin.copy:
+    content: >-
+      {{ k3s_kubeconfig.content | b64decode
+         | replace('https://127.0.0.1:6443', 'https://' ~ ansible_host ~ ':6443')
+         | replace('name: default', 'name: linkpulse-home') | replace('cluster: default', 'cluster: linkpulse-home')
+         | replace('user: default', 'user: linkpulse-home') | replace('current-context: default', 'current-context: linkpulse-home') }}
+    dest: "{{ kubeconfig_dest }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  no_log: true
