@@ -1,0 +1,4 @@
+# `terraform.tfvars`로 복사해 채운다(실제 tfvars는 .gitignore). 기본값으로도 동작한다.
+
+# scripts/home-pki.sh가 만든 CA 인증서(공개 정보). 기본값과 다를 때만 적는다.
+# ca_cert_path = "~/.linkpulse-home/pki/ca.crt"
