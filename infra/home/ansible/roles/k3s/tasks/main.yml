@@ -45,8 +45,14 @@
 - name: 바뀐 설정을 지금 반영
   ansible.builtin.meta: flush_handlers
 
+# k3s는 apiserver가 뜨면 systemd에 준비됨을 알린다(노드 등록 전). 그때 노드가 0개면 kubectl wait는 기다리지 않고
+# "no matching resources found"로 바로 실패하므로, 노드가 생길 때까지 다시 시도한다(최대 3분).
 - name: 노드 Ready 기다리기
   ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+  register: k3s_node_ready
+  until: k3s_node_ready.rc == 0
+  retries: 36
+  delay: 5
   changed_when: false
 
 # kubeconfig를 맥으로 가져온다. 서버 주소를 VM IP로, 이름(default)을 linkpulse-home으로 바꾼다 —

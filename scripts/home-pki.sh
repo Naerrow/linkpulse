@@ -105,6 +105,9 @@ if [[ -e "$PKI_DIR/ca.key" ]]; then
   echo "CA가 이미 있다 — 덮어쓰지 않는다($PKI_DIR/ca.crt)"
 else
   [[ -e "$PKI_DIR/ca.crt" ]] && die "ca.key 없이 ca.crt만 있다 — 손으로 정리한 뒤 다시 실행한다"
+  # CA는 인자 없는 실행에서만 만든다. --renew-leaf·--test-leaf가 새 CA를 만들면 그 말단은 트러스트 앵커에 없는 CA가 서명해
+  # CreateSession이 거부된다(맥을 바꿨거나 PKI_DIR이 틀렸거나 백업에서 ca.*가 빠진 경우).
+  [[ -z "${1:-}" ]] || die "CA가 없다($PKI_DIR) — $1 모드는 트러스트 앵커에 올린 기존 CA로만 발급한다. PKI_DIR·백업을 확인한다"
   make_ca
   echo "CA를 만들었다. ca.key를 비밀번호 관리자 등 오프라인에 백업한다(분실하면 트러스트 앵커를 새 CA로 바꿔야 한다)"
 fi
