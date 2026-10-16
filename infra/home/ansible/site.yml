@@ -1,0 +1,19 @@
+# 집 사이트 VM 설정 (plan 0017 설계 2·3). infra/home apply 뒤, infra/home-k8s apply 전에 돈다.
+# 순서: common(둘 다) → postgres → k3s. 다시 돌려도 같은 결과다(이미 맞으면 바꾸지 않는다).
+- name: 공통(게스트 에이전트·시간 동기)
+  hosts: all
+  become: true
+  roles:
+    - common
+
+- name: PostgreSQL 16
+  hosts: postgres
+  become: true
+  roles:
+    - postgres
+
+- name: k3s 서버
+  hosts: k3s
+  become: true
+  roles:
+    - k3s
